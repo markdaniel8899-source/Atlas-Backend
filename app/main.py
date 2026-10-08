@@ -8,6 +8,12 @@ from app import ai_service
 from app.config import get_settings
 from app.routers import chat, quizzes, roadmaps
 
+REQUIRED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://atlas-frontend-pearl.vercel.app",
+]
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -20,7 +26,9 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(settings.allowed_origins),
+        allow_origins=list(
+            dict.fromkeys([*REQUIRED_ORIGINS, *settings.allowed_origins])
+        ),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
