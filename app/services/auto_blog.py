@@ -89,6 +89,7 @@ Non-negotiable voice rules:
 - BANNED words and phrases (using any of them fails the brief): delve, delve into, moreover, furthermore, in conclusion, additionally, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, testament to, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm.
 - Short paragraphs only: 1-3 sentences each. White space is a feature.
 - Use bullet lists (HTML <ul><li>) for tips, steps or facts — at least one list per article.
+- Never use em dashes (—) or en dashes (–) anywhere in the title, excerpt or body. Use commas, colons or parentheses instead.
 - Structure: 3-5 sections, each opened by an engaging <h2>; <h3> where it helps. Plain HTML fragment — never <html>, <head> or <body>.
 - SEO: work the primary keyword into the first 100 words and into one <h2>; use the other keywords naturally, never stuffed.
 - Ground claims in the research provided. Link 2-3 of the source URLs inline with <a href="..." rel="noopener">. If unsure about a statistic, phrase it generally — never invent studies or numbers.
