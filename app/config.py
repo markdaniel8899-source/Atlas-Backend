@@ -13,6 +13,8 @@ load_dotenv()
 class Settings:
     groq_api_key: str
     groq_base_url: str
+    groq_blog_api_key: str
+    groq_blog_model: str
     allowed_origins: tuple[str, ...]
     request_timeout: float
     max_retries: int
@@ -33,8 +35,12 @@ class Settings:
 
     @property
     def blog_ready(self) -> bool:
-        """Auto Blog needs Gemini to write and the service-role key to save."""
-        return bool(self.google_api_key) and bool(self.supabase_service_role_key)
+        """Auto Blog needs the DEDICATED Groq blog key to write and the
+        service-role key to save. GOOGLE_API_KEY is optional — it only
+        powers the Gemini fallback when Groq hits 429/5xx."""
+        return bool(self.groq_blog_api_key) and bool(
+            self.supabase_service_role_key
+        )
 
 
 @lru_cache(maxsize=1)
@@ -51,6 +57,13 @@ def get_settings() -> Settings:
         groq_base_url=os.getenv(
             "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
         ).strip(),
+        # Dedicated blog writer key — deliberately NOT GROQ_API_KEY, which is
+        # reserved for Chat/Quiz so blog traffic can never starve the app.
+        groq_blog_api_key=os.getenv("GROQ_BLOG_API_KEY", "").strip(),
+        # NOTE: llama-3.1-70b-versatile was decommissioned by Groq (Jan 2025);
+        # openai/gpt-oss-120b is its live replacement.
+        groq_blog_model=os.getenv("GROQ_BLOG_MODEL", "openai/gpt-oss-120b").strip()
+        or "openai/gpt-oss-120b",
         allowed_origins=origins,
         request_timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "180")),
         max_retries=int(os.getenv("AI_MAX_RETRIES", "1")),

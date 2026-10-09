@@ -315,9 +315,12 @@ def extract_json(text: str, prefer: str | tuple[str, ...] | None = None) -> Any:
 
 
 def _has_key(value: Any, key: str | tuple[str, ...]) -> bool:
-    """True when `value` (or a dict one level down) holds a non-empty list at `key`.
+    """True when `value` (or a dict one level down) holds a non-empty value at `key`.
 
     `key` may be a tuple of alternatives; any one of them counts as a match.
+    Accepts non-empty lists (e.g. "keywords", "phases") AND non-empty
+    strings (e.g. "meta_title", "topic") — previously only lists counted,
+    so string-valued `prefer` keys always failed validation.
     """
     wanted = (key,) if isinstance(key, str) else key
     if not isinstance(value, dict):
@@ -325,7 +328,11 @@ def _has_key(value: Any, key: str | tuple[str, ...]) -> bool:
 
     def holds(mapping: dict[str, Any]) -> bool:
         return any(
-            isinstance(mapping.get(name), list) and mapping.get(name)
+            (isinstance(mapping.get(name), list) and mapping.get(name))
+            or (
+                isinstance(mapping.get(name), str)
+                and bool(mapping.get(name).strip())
+            )
             for name in wanted
         )
 

@@ -16,9 +16,12 @@ from app.services import auto_blog
 
 # Background-task logs go to stdout (the nohup log). A non-tty stdout is
 # block-buffered, so those prints never appeared next to uvicorn's 202 line.
-# Line-buffer so every print flushes immediately.
+# Line-buffer so every print flushes immediately; UTF-8 + errors="replace"
+# so emoji/arrow characters can never raise UnicodeEncodeError in a print.
 try:
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(
+        line_buffering=True, encoding="utf-8", errors="replace"
+    )
 except Exception:  # noqa: BLE001 - stdout swapped by a test harness → skip
     pass
 
@@ -55,7 +58,7 @@ def create_app() -> FastAPI:
             print("[AutoBlog] scheduled — every day at 09:00 UTC")
         else:
             print(
-                "[AutoBlog] scheduler disabled — set GOOGLE_API_KEY and "
+                "[AutoBlog] scheduler disabled — set GROQ_BLOG_API_KEY and "
                 "SUPABASE_SERVICE_ROLE_KEY (manual POST /api/blog/generate "
                 "will also be unavailable)"
             )
@@ -116,17 +119,19 @@ def create_app() -> FastAPI:
 
     @app.post("/api/blog/generate", tags=["blog"], status_code=202)
     async def generate_blog_post(background_tasks: BackgroundTasks) -> dict[str, object]:
-        """Kick off the staggered HYBRID Auto Blog pipeline in the background:
-        Tavily research → NVIDIA NIM keywords/meta → Gemini article (its one
-        call per run) → Pollinations images (one by one, with pauses) →
-        Supabase save. The pauses keep every provider under its rate limit,
-        so the run takes a few minutes.
+        """Kick off the staggered HYBRID Auto Blog pipeline in the background
+        (returns 202 immediately — the work runs as a FastAPI BackgroundTask):
+        Tavily research + Nemotron Ultra topic/keywords → Groq meta + article
+        (automatic Gemini fallback on Groq 429/5xx) → Pollinations images
+        (one by one, with pauses) → Supabase save. The pauses keep every
+        provider under its rate limit, so the run takes a few minutes.
         """
         if not settings.blog_ready:
             raise auto_blog.BlogPipelineError(
-                "Auto Blog is not configured: set GOOGLE_API_KEY and "
-                "SUPABASE_SERVICE_ROLE_KEY on the server (and NVIDIA_API_KEY "
-                "for the lightweight topic/meta chunks).",
+                "Auto Blog is not configured: set GROQ_BLOG_API_KEY (dedicated "
+                "blog writer) and SUPABASE_SERVICE_ROLE_KEY on the server. "
+                "GOOGLE_API_KEY enables the Gemini fallback; NVIDIA_API_KEY + "
+                "TAVILY_API_KEY power the research steps.",
                 status_code=503,
             )
         if auto_blog.is_run_active():

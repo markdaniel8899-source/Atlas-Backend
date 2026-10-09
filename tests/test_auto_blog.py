@@ -117,6 +117,7 @@ class TestNimChat(unittest.TestCase):
 
     def test_success_returns_stripped_content(self):
         fake = mock.Mock()
+        fake.status_code = 200
         fake.raise_for_status = mock.Mock()
         fake.json.return_value = {"choices": [{"message": {"content": "  hello "}}]}
         with (
@@ -143,6 +144,7 @@ class TestNimChat(unittest.TestCase):
 
     def test_http_error_becomes_pipeline_error(self):
         fake = mock.Mock()
+        fake.status_code = 400
         fake.raise_for_status.side_effect = RuntimeError("429 too many requests")
         with (
             mock.patch.object(auto_blog, "NVIDIA_API_KEY", "test-key"),
@@ -153,6 +155,7 @@ class TestNimChat(unittest.TestCase):
 
     def test_empty_text_raises_pipeline_error(self):
         fake = mock.Mock()
+        fake.status_code = 200
         fake.raise_for_status = mock.Mock()
         fake.json.return_value = {"choices": [{"message": {"content": "   "}}]}
         with (

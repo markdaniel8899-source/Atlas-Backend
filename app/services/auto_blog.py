@@ -3,28 +3,32 @@
 Runs in the background via FastAPI BackgroundTasks (POST /api/blog/generate)
 and daily at 09:00 UTC through APScheduler (wired up in app.main).
 
-HYBRID MODEL ROUTING — Gemini's free-tier quota is tiny, so it is reserved
-for the one task it does best (long-form article writing). Everything else
-runs on NVIDIA NIM (free, OpenAI-compatible):
+HYBRID MODEL ROUTING — every provider does what it is best at:
 
-  - NVIDIA NIM : topic extraction, keywords, meta title/description
-  - Gemini     : final ~1000-word article only (1 call per run)
-  - Tavily     : web research (not an LLM)
-  - Pollinations.ai : cover + in-article images (keyless)
+  - Tavily     : web research (not an LLM)                     [steps 1-2]
+  - NVIDIA NIM : Nemotron Ultra 550B picks the trending topic
+                 and extracts the top 3-5 SEO keywords.        [steps 1-2]
+  - Groq       : DEDICATED key (GROQ_BLOG_API_KEY, never the
+                 Chat/Quiz GROQ_API_KEY) writes the meta data
+                 and the main article.                         [steps 3-4]
+  - Gemini     : automatic fallback for steps 3-4 ONLY when
+                 Groq returns 429 (rate limit) or 5xx.         [steps 3-4]
+  - Pollinations.ai : cover + in-article images (keyless).     [step 5]
+  - Supabase   : save the finished post.                       [step 6]
 
 The pipeline is deliberately split into chunks with pauses between them so
 no provider sees a burst of back-to-back calls (avoids 429s):
 
-  1. Research      — Tavily Search in the "AI & Technology" niche.   [5s]
-  2. Keywords      — NVIDIA NIM distills one trending topic + the top
-                     3-5 SEO keywords from the results. Tavily failure
-                     falls back to a curated niche topic.            [5s]
-  3. Meta          — NVIDIA NIM writes the catchy meta title + meta
-                     description (with plain fallbacks).             [5s]
-  4. Write         — Gemini writes a ~1000-word, SEO-optimised article
+  1. Research      — Tavily search in the "AI & Technology" niche, then
+                     Nemotron Ultra picks ONE trending topic.     [2s]
+  2. Keywords      — Nemotron Ultra distills the top 3-5 SEO
+                     keywords for the topic (heuristic fallback). [2s]
+  3. Meta          — Groq writes the catchy meta title + meta
+                     description (plain fallbacks; Gemini retry on
+                     429/5xx).                                    [3s]
+  4. Write         — Groq writes a ~1000-word, SEO-optimised article
                      as strict JSON (title / excerpt / content_html /
-                     tags). Basic human language; robotic AI phrasing
-                     and keyword stuffing are banned.                [5s]
+                     tags); same Gemini retry on 429/5xx.         [3s]
   5. Images        — Pollinations.ai cover + up to three in-article
                      images (800x450) generated ONE BY ONE with a 3s
                      pause between each; the URLs are embedded as
@@ -32,14 +36,16 @@ no provider sees a burst of back-to-back calls (avoids 429s):
   6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
-Error handling: every chunk is wrapped in try/except — any Tavily, NIM,
-Gemini, or database failure is logged as [AutoBlog] and the run exits
-gracefully (returns None) without ever crashing the server. NIM failures
-in steps 2-3 fall back to plain heuristics (no Gemini quota burned).
+Error handling: the entire orchestrator body is wrapped in one
+try/except that prints [AutoBlog Background] CRITICAL TASK ERROR plus a
+traceback, and every chunk also logs its own [AutoBlog Background] Step N
+line. NIM failures in steps 1-2 fall back to plain heuristics (no Groq or
+Gemini quota burned).
 
 Async note: clients are created per run on purpose — the background task
 and the scheduler job each own their event loop; no client object may be
-shared across loops.
+shared across loops. Sleeps are ALWAYS `asyncio.sleep` (this function is
+an `async def` on the event loop — `time.sleep` would block all requests).
 """
 
 from __future__ import annotations
@@ -70,13 +76,17 @@ from app.config import get_settings
 # captures. Non-tty stdout is BLOCK-buffered (8KB), so step logs sat in the
 # buffer and never showed up next to uvicorn's stderr access log ("202
 # Accepted") — the task ran but looked dead. Line-buffering makes each print
-# hit the log file immediately.
+# hit the log file immediately. UTF-8 + errors="replace" guarantees the emoji
+# and arrow characters can never crash a print (ASCII/Latin-1 locales would
+# otherwise raise UnicodeEncodeError inside the task).
 try:
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(
+        line_buffering=True, encoding="utf-8", errors="replace"
+    )
 except Exception:  # noqa: BLE001 - stdout swapped by a test harness → skip
     pass
 
-# ── NVIDIA NIM (hybrid pipeline: all chunks EXCEPT article writing) ──────────
+# ── NVIDIA NIM (research phase: trending topic + SEO keywords) ───────────────
 # OpenAI-compatible endpoint at integrate.api.nvidia.com. Free-tier friendly.
 # Note: read AFTER `from app.config import get_settings` so load_dotenv() has
 # already populated os.environ from backend/.env.
@@ -84,7 +94,9 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_API_URL = os.getenv(
     "NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1"
 ).strip()
-NVIDIA_MODEL = os.getenv("NVIDIA_BLOG_MODEL", "meta/llama-3.3-70b-instruct").strip()
+NVIDIA_MODEL = os.getenv(
+    "NVIDIA_BLOG_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
+).strip()
 
 MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 
@@ -92,7 +104,8 @@ MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 MAX_CONTENT_IMAGES = 3
 
 # Deliberate pauses between chunks — keep every provider under its rate limit.
-STEP_PAUSE_SECONDS = 5  # after research / keywords / meta / write
+RESEARCH_PAUSE_SECONDS = 2  # after topic (step 1) and keywords (step 2)
+WRITE_PAUSE_SECONDS = 3  # after meta (step 3) and article (step 4)
 IMAGE_PAUSE_SECONDS = 3  # between in-article image generations
 
 # Single niche for the daily research query.
@@ -141,13 +154,21 @@ Return ONLY strict JSON (no markdown fences, no commentary before or after):
 - content_html: the full article body as an HTML fragment.
 - tags: 3-5 lowercase topic tags."""
 
-_OUTLINE_SYSTEM = """You are an SEO content strategist. From the research snippets, pick ONE specific, currently trending, searchable blog topic (not a generic pillar term) and extract the top 3 to 5 SEO keywords for it.
+_TOPIC_SYSTEM = """You are an SEO trend analyst for ATLAS, a learning OS for students.
+From the research snippets, pick ONE specific, currently trending, searchable blog topic (not a generic pillar term).
 
 Return ONLY strict JSON (no fences, no commentary):
-{"topic": "...", "keywords": ["...", "...", "..."]}
+{"topic": "..."}
 
-- topic: a concrete angle a reader would click, max 120 chars.
-- keywords: 3 to 5, each 1-3 words, lowercase, no dupes."""
+- topic: a concrete angle a reader would click, max 120 chars."""
+
+_KEYWORD_SYSTEM = """You are an SEO content strategist for ATLAS, a learning OS for students.
+Extract the top 3 to 5 SEO keywords for the given blog topic.
+
+Return ONLY strict JSON (no fences, no commentary):
+{"keywords": ["...", "...", "..."]}
+
+- keywords: 3 to 5, each 1-3 words, lowercase, no dupes, primary keyword first."""
 
 _META_SYSTEM = """You are an SEO meta-copy expert. From the topic and keywords provided, write ONE catchy meta title and ONE meta description for the blog post.
 
@@ -228,32 +249,52 @@ def _nim_chat(
 ) -> str:
     """Sync NVIDIA NIM chat call (OpenAI-compatible) — run via asyncio.to_thread.
 
-    Used for the outline (topic + keywords) and meta chunks so Gemini's small
-    free-tier quota is saved for article writing only.
+    Used for the research chunks (trending topic + SEO keywords). NIM's
+    free tier intermittently answers 429/503, so ONE immediate retry
+    absorbs the blip; anything deeper is left to the caller's heuristics.
     """
     if not NVIDIA_API_KEY:
         raise BlogPipelineError("NVIDIA_API_KEY is not configured.", status_code=503)
+    text = ""
     try:
-        response = requests.post(
-            f"{NVIDIA_API_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": NVIDIA_MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            timeout=90,
-        )
-        response.raise_for_status()
-        data = response.json()
-        text = str(data["choices"][0]["message"]["content"] or "").strip()
+        for attempt in range(2):
+            response = requests.post(
+                f"{NVIDIA_API_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": NVIDIA_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=90,
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt == 0:
+                    print(
+                        f"[AutoBlog] NIM HTTP {response.status_code} — "
+                        "retrying once...",
+                        flush=True,
+                    )
+                    continue
+                raise BlogPipelineError(
+                    f"NVIDIA NIM call failed: HTTP {response.status_code}: "
+                    f"{response.text[:160]}"
+                )
+            response.raise_for_status()
+            data = response.json()
+            text = str(data["choices"][0]["message"]["content"] or "").strip()
+            if text:
+                break
+            print(
+                "[AutoBlog] NIM returned empty text — retrying once...", flush=True
+            )
     except BlogPipelineError:
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a pipeline error
@@ -263,7 +304,103 @@ def _nim_chat(
     return text
 
 
-# ───────────────────────── Gemini helpers (article writing) ──────────────────
+# ───────────────── Groq blog helpers (meta + article writing) ────────────────
+
+
+class GroqTransientError(RuntimeError):
+    """Groq rate limit (429) or server error (5xx) → retry the same prompt on Gemini."""
+
+
+def _groq_blog_chat(
+    system: str, prompt: str, *, temperature: float, max_tokens: int
+) -> str:
+    """Sync Groq chat call on the DEDICATED blog key — run via asyncio.to_thread.
+
+    Uses GROQ_BLOG_API_KEY (never GROQ_API_KEY, which is reserved for the
+    Chat/Quiz routes). Raises GroqTransientError on 429/5xx so the caller
+    can fall back to Gemini with the exact same prompt.
+    """
+    settings = get_settings()
+    if not settings.groq_blog_api_key:
+        raise BlogPipelineError(
+            "GROQ_BLOG_API_KEY is not configured.", status_code=503
+        )
+    text = ""
+    try:
+        # One retry for transient 200-but-empty responses (Groq occasionally
+        # returns an empty message; never let that silently kill a run).
+        for attempt in range(2):
+            response = requests.post(
+                f"{settings.groq_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.groq_blog_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.groq_blog_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=120,
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                raise GroqTransientError(
+                    f"HTTP {response.status_code}: {response.text[:200]}"
+                )
+            response.raise_for_status()
+            data = response.json()
+            text = str(data["choices"][0]["message"]["content"] or "").strip()
+            if text:
+                break
+            print(
+                f"[AutoBlog] Groq returned empty text (attempt {attempt + 1}/2) "
+                "— retrying...",
+                flush=True,
+            )
+    except GroqTransientError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced as a pipeline error
+        raise BlogPipelineError(f"Groq blog call failed: {exc}") from exc
+    if not text:
+        raise BlogPipelineError("Groq returned empty text.")
+    return text
+
+
+async def _groq_with_gemini_fallback(
+    system: str, prompt: str, *, temperature: float, max_tokens: int
+) -> str:
+    """Groq first; on 429/5xx retry the SAME prompt/system via Gemini."""
+    try:
+        return await asyncio.to_thread(
+            _groq_blog_chat,
+            system,
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except GroqTransientError as exc:
+        print(
+            "[AutoBlog Background] Groq rate limit hit. Falling back to Gemini...",
+            flush=True,
+        )
+        print(f"[AutoBlog Background] Groq error detail: {exc}", flush=True)
+        settings = get_settings()
+        if not settings.google_api_key:
+            raise BlogPipelineError(
+                "Groq failed and GOOGLE_API_KEY (Gemini fallback) is not configured.",
+                status_code=503,
+            ) from exc
+        model = _gemini_model(system)
+        return await _generate(
+            model, prompt, temperature=temperature, max_tokens=max_tokens
+        )
+
+
+# ───────────────────── Gemini helpers (rate-limit fallback only) ─────────────
 
 
 def _gemini_model(system_instruction: str) -> genai.GenerativeModel:
@@ -328,27 +465,8 @@ def _clean_result(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def _outline(results: list[dict[str, str]]) -> dict[str, Any]:
-    """NVIDIA NIM picks the day's topic + top 3-5 keywords from the results."""
-    blob = "\n".join(
-        f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
-    )
-    try:
-        text = await asyncio.to_thread(
-            _nim_chat,
-            _OUTLINE_SYSTEM,
-            f"Today's research:\n{blob}",
-            temperature=0.3,
-            max_tokens=1024,
-        )
-        return ai_service.extract_json(text, prefer="keywords")
-    except Exception as exc:  # noqa: BLE001 - any failure falls back to heuristics
-        print(f"[AutoBlog] outline extraction failed (NIM): {type(exc).__name__}: {exc}")
-        return {}
-
-
 async def _research_chunk() -> list[dict[str, str]]:
-    """Step 1/6: Tavily trending-topic search (raises on failure)."""
+    """Step 1/6 (part A): Tavily trending-topic search (raises on failure)."""
     query = f"{NICHE} {_utc().year} trending"
     raw = await asyncio.to_thread(_tavily_search, query)
     return [
@@ -356,44 +474,78 @@ async def _research_chunk() -> list[dict[str, str]]:
     ]
 
 
-async def _keywords_chunk(results: list[dict[str, str]]) -> Research:
-    """Step 2/6: NVIDIA NIM picks the topic + top 3-5 keywords from results.
+async def _topic_chunk(results: list[dict[str, str]]) -> str:
+    """Step 1/6 (part B): Nemotron Ultra picks the day's trending topic.
 
     Falls back to a curated daily topic when Tavily returned nothing, and to
-    the first headline when NIM extraction fails.
+    the first headline when Nemotron extraction fails (never raises).
     """
     if not results:
         topic = FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
         print(f"[AutoBlog] research fallback -> topic={topic!r}")
-        return Research(topic=topic, keywords=_pad_keywords([], topic), snippets=[])
+        return topic
 
-    outline = await _outline(results)
-    topic = str(outline.get("topic") or "").strip()
-    if not topic:
-        # NIM failed → first result's headline is a decent specific topic.
-        topic = results[0]["title"].split("|")[0].split(" - ")[0].strip()[:120]
-    raw_keywords = outline.get("keywords")
-    keywords = _pad_keywords(
-        [str(k) for k in raw_keywords] if isinstance(raw_keywords, list) else [],
-        topic,
+    blob = "\n".join(
+        f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
     )
-    snippets = [
-        f"{r['title']} ({r['url']}): {r['content'][:500]}"
-        for r in results
-        if r["content"] or r["title"]
-    ]
-    return Research(topic=topic, keywords=keywords, snippets=snippets)
-
-
-async def _meta_chunk(research: Research) -> tuple[str, str]:
-    """Step 3/6: catchy meta title + meta description via NVIDIA NIM.
-
-    Plain (non-LLM) fallbacks keep the run alive when NIM is down.
-    """
-    sources = "\n".join(f"- {s}" for s in research.snippets[:3]) or "(none)"
     try:
         text = await asyncio.to_thread(
             _nim_chat,
+            _TOPIC_SYSTEM,
+            f"Today's research:\n{blob}",
+            temperature=0.3,
+            max_tokens=2048,
+        )
+        data = ai_service.extract_json(text, prefer="topic")
+        topic = str(data.get("topic") or "").strip() if isinstance(data, dict) else ""
+        if topic:
+            return topic[:120]
+        print("[AutoBlog] topic chunk returned no topic — using headline fallback.")
+    except Exception as exc:  # noqa: BLE001 - heuristics keep the run alive
+        print(f"[AutoBlog] topic extraction failed (Nemotron): {type(exc).__name__}: {exc}")
+    headline = results[0]["title"].split("|")[0].split(" - ")[0].strip()[:120]
+    return headline or FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
+
+
+async def _keyword_chunk(topic: str, results: list[dict[str, str]]) -> list[str]:
+    """Step 2/6: Nemotron Ultra extracts the top 3-5 SEO keywords.
+
+    Heuristic padding (_pad_keywords) keeps the list usable when NIM fails.
+    """
+    blob = (
+        "\n".join(
+            f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
+        )
+        or "(no research snippets)"
+    )
+    try:
+        text = await asyncio.to_thread(
+            _nim_chat,
+            _KEYWORD_SYSTEM,
+            f"Topic: {topic}\nResearch snippets:\n{blob}",
+            temperature=0.3,
+            max_tokens=2048,
+        )
+        data = ai_service.extract_json(text, prefer="keywords")
+        raw = data.get("keywords") if isinstance(data, dict) else None
+        keywords = _pad_keywords(
+            [str(k) for k in raw] if isinstance(raw, list) else [], topic
+        )
+        print(f"[AutoBlog] keyword extraction OK -> {', '.join(keywords)}")
+        return keywords
+    except Exception as exc:  # noqa: BLE001 - heuristics keep the run alive
+        print(f"[AutoBlog] keyword extraction failed (Nemotron): {type(exc).__name__}: {exc}")
+        return _pad_keywords([], topic)
+
+
+async def _meta_chunk(research: Research) -> tuple[str, str]:
+    """Step 3/6: catchy meta title + meta description via Groq (Gemini fallback).
+
+    Plain (non-LLM) fallbacks keep the run alive when BOTH providers fail.
+    """
+    sources = "\n".join(f"- {s}" for s in research.snippets[:3]) or "(none)"
+    try:
+        text = await _groq_with_gemini_fallback(
             _META_SYSTEM,
             f"Topic: {research.topic}\n"
             f"Keywords: {', '.join(research.keywords)}\n"
@@ -409,7 +561,7 @@ async def _meta_chunk(research: Research) -> tuple[str, str]:
                 return title[:300], description[:300]
         print("[AutoBlog] meta chunk returned incomplete JSON — using fallbacks.")
     except Exception as exc:  # noqa: BLE001 - fallback keeps the run alive
-        print(f"[AutoBlog] meta generation failed (NIM): {type(exc).__name__}: {exc}")
+        print(f"[AutoBlog] meta generation failed (Groq/Gemini): {type(exc).__name__}: {exc}")
     fallback_desc = (
         research.snippets[0][:170].rstrip() + "…"
         if research.snippets
@@ -436,8 +588,9 @@ async def _write_article(research: Research) -> dict[str, Any]:
         "the extracted keywords. 100% unique, no plagiarism."
     )
 
-    model = _gemini_model(_WRITER_SYSTEM)
-    text = await _generate(model, user_prompt, temperature=0.8, max_tokens=4096)
+    text = await _groq_with_gemini_fallback(
+        _WRITER_SYSTEM, user_prompt, temperature=0.8, max_tokens=4096
+    )
 
     try:
         data = ai_service.extract_json(text, prefer="tags")
@@ -687,41 +840,54 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # Step 1/6 — Research (Tavily).
+            # Step 1/6 — Research: Tavily search + Nemotron Ultra topic pick.
+            results: list[dict[str, str]] = []
             print(
-                "[AutoBlog Background] Step 1: Starting research (Tavily)...",
+                "[AutoBlog Background] Step 1: Starting research (Tavily + "
+                "NVIDIA Nemotron Ultra topic)...",
                 flush=True,
             )
             try:
                 results = await _research_chunk()
+                topic = await _topic_chunk(results)
+                research = Research(
+                    topic=topic,
+                    keywords=[],
+                    snippets=[
+                        f"{r['title']} ({r['url']}): {r['content'][:500]}"
+                        for r in results
+                        if r["content"] or r["title"]
+                    ],
+                )
                 print(
                     f"[AutoBlog Background] Step 1/6: Research complete "
-                    f"({len(results)} results). "
-                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    f"({len(results)} results, topic={research.topic!r}). "
+                    f"Waiting {RESEARCH_PAUSE_SECONDS}s...",
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001 - curated fallback keeps the run alive
-                results = []
+                topic = FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
+                research = Research(topic=topic, keywords=[], snippets=[])
                 print(
                     f"[AutoBlog Background] Step 1/6: Research failed "
                     f"({type(exc).__name__}: {exc}); fallback topic. "
-                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    f"Waiting {RESEARCH_PAUSE_SECONDS}s...",
                     flush=True,
                 )
-            await asyncio.sleep(STEP_PAUSE_SECONDS)
+            await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
 
-            # Step 2/6 — Keyword extraction (NVIDIA NIM).
+            # Step 2/6 — Keywords (Nemotron Ultra).
             print(
                 "[AutoBlog Background] Step 2: Extracting keywords "
-                "(NVIDIA NIM)...",
+                "(NVIDIA Nemotron Ultra)...",
                 flush=True,
             )
             try:
-                research = await _keywords_chunk(results)
+                research.keywords = await _keyword_chunk(research.topic, results)
                 print(
                     f"[AutoBlog Background] Step 2/6: Keywords complete "
                     f"({', '.join(research.keywords)}). "
-                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    f"Waiting {RESEARCH_PAUSE_SECONDS}s...",
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -731,19 +897,19 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
                 return None
-            await asyncio.sleep(STEP_PAUSE_SECONDS)
+            await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
 
-            # Step 3/6 — Meta title + description (NVIDIA NIM).
+            # Step 3/6 — Meta title + description (Groq → Gemini on 429/5xx).
             print(
                 "[AutoBlog Background] Step 3: Generating meta title and "
-                "description (NVIDIA NIM)...",
+                "description (Groq → Gemini fallback)...",
                 flush=True,
             )
             try:
                 meta_title, meta_description = await _meta_chunk(research)
                 print(
                     f"[AutoBlog Background] Step 3/6: Meta data complete. "
-                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    f"Waiting {WRITE_PAUSE_SECONDS}s...",
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -753,18 +919,19 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
                 return None
-            await asyncio.sleep(STEP_PAUSE_SECONDS)
+            await asyncio.sleep(WRITE_PAUSE_SECONDS)
 
-            # Step 4/6 — Article writing (Gemini).
+            # Step 4/6 — Article writing (Groq → Gemini on 429/5xx).
             print(
-                "[AutoBlog Background] Step 4: Writing article with Gemini...",
+                "[AutoBlog Background] Step 4: Writing article "
+                "(Groq → Gemini fallback)...",
                 flush=True,
             )
             try:
                 article = await _write_article(research)
                 print(
                     f"[AutoBlog Background] Step 4/6: Article written. "
-                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    f"Waiting {WRITE_PAUSE_SECONDS}s...",
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -774,7 +941,7 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
                 return None
-            await asyncio.sleep(STEP_PAUSE_SECONDS)
+            await asyncio.sleep(WRITE_PAUSE_SECONDS)
 
             # Step 5/6 — Images (Pollinations, one by one).
             print(
