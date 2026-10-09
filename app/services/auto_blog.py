@@ -669,7 +669,8 @@ async def fetch_relevant_image(keywords: str) -> str | None:
                     "orientation": "horizontal",
                     "safesearch": "true",
                     "min_width": 1280,
-                    "per_page": 1,
+                    # Pixabay's valid per_page range is 3-200; we only use hits[0].
+                    "per_page": 3,
                 },
                 timeout=10,
             )

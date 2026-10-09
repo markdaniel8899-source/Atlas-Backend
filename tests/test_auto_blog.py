@@ -61,7 +61,8 @@ class TestFetchRelevantImage(unittest.TestCase):
         self.assertEqual(params["q"], "ai education")
         self.assertEqual(params["image_type"], "photo")
         self.assertEqual(params["orientation"], "horizontal")
-        self.assertEqual(params["per_page"], 1)
+        # Pixabay's valid per_page range is 3-200; we only use hits[0].
+        self.assertEqual(params["per_page"], 3)
 
     def test_http_error_returns_none(self):
         client, cm = _fake_pixabay_client([])
