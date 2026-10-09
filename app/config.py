@@ -58,7 +58,7 @@ def get_settings() -> Settings:
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", "").strip(),
         supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
         google_api_key=os.getenv("GOOGLE_API_KEY", "").strip(),
-        blog_model=os.getenv("GOOGLE_BLOG_MODEL", "gemini-1.5-flash").strip()
-        or "gemini-1.5-flash",
+        blog_model=os.getenv("GOOGLE_BLOG_MODEL", "gemini-3.8-flash").strip()
+        or "gemini-3.8-flash",
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
     )

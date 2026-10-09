@@ -180,6 +180,7 @@ def _gemini_model(system_instruction: str) -> genai.GenerativeModel:
     settings = get_settings()
     if not settings.google_api_key:
         raise BlogPipelineError("GOOGLE_API_KEY is not configured.", status_code=503)
+    genai.configure(api_key=settings.google_api_key)
     # Fresh model object per call — never shared across event loops.
     return genai.GenerativeModel(
         model_name=settings.blog_model,
