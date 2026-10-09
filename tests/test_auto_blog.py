@@ -93,5 +93,19 @@ class TestPipelineGraceful(unittest.TestCase):
         auto_blog._RUN_LOCK.release()
 
 
+class TestStaggeredPipeline(unittest.TestCase):
+    def test_skips_when_already_running(self):
+        """Lock held → staggered run logs and returns None without touching APIs."""
+        self.assertTrue(auto_blog._RUN_LOCK.acquire(blocking=False))
+        try:
+            self.assertTrue(auto_blog.is_run_active())
+            result = asyncio.run(auto_blog.run_staggered_blog_pipeline())
+            self.assertIsNone(result)
+            self.assertTrue(auto_blog._RUN_LOCK.locked())
+        finally:
+            auto_blog._RUN_LOCK.release()
+        self.assertFalse(auto_blog.is_run_active())
+
+
 if __name__ == "__main__":
     unittest.main()

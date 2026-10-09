@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -105,24 +105,31 @@ def create_app() -> FastAPI:
             },
         }
 
-    @app.post("/api/blog/generate", tags=["blog"], status_code=201)
-    async def generate_blog_post() -> dict[str, object]:
-        """Run the Auto Blog pipeline now: Tavily research → Gemini article →
-        Pollinations cover URL → Supabase save."""
+    @app.post("/api/blog/generate", tags=["blog"], status_code=202)
+    async def generate_blog_post(background_tasks: BackgroundTasks) -> dict[str, object]:
+        """Kick off the staggered Auto Blog pipeline in the background:
+        Tavily research → Gemini keywords/meta/article → Pollinations
+        images (one by one, with pauses) → Supabase save. The pauses keep
+        every provider under its rate limit, so the run takes a few minutes.
+        """
         if not settings.blog_ready:
             raise auto_blog.BlogPipelineError(
                 "Auto Blog is not configured: set GOOGLE_API_KEY and "
                 "SUPABASE_SERVICE_ROLE_KEY on the server.",
                 status_code=503,
             )
-        result = await auto_blog.run_pipeline()
-        if result is None:
-            # Stage errors are already logged as [AutoBlog] … — graceful exit.
+        if auto_blog.is_run_active():
             raise auto_blog.BlogPipelineError(
-                "Blog generation failed — see server logs for the stage error.",
-                status_code=502,
+                "A blog generation run is already in progress.", status_code=409
             )
-        return {"status": "created", **result}
+        background_tasks.add_task(auto_blog.run_staggered_blog_pipeline)
+        return {
+            "status": "success",
+            "message": (
+                "Blog generation started in background. It will take a few "
+                "minutes to avoid rate limits."
+            ),
+        }
 
     return app
 

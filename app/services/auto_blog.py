@@ -1,34 +1,35 @@
-"""Auto AI Blog Writer — research → write → cover URL → save.
+"""Auto AI Blog Writer — staggered 6-chunk pipeline (rate-limit friendly).
 
-Runs on demand via POST /api/blog/generate and daily at 09:00 UTC through
-APScheduler (wired up in app.main).
+Runs in the background via FastAPI BackgroundTasks (POST /api/blog/generate)
+and daily at 09:00 UTC through APScheduler (wired up in app.main).
 
-Stages:
-  1. Research      — Tavily Search in the "AI & Technology" niche; Gemini
-                     distills one trending topic + the top 3-5 SEO keywords
-                     from the results. Tavily failure falls back to a
-                     curated niche topic (never crashes the run).
-  2. Write         — Gemini 1.5 Flash writes a ~1000-word, SEO-optimised
-                     article as strict JSON (title / excerpt / content_html /
-                     tags). The system prompt bans robotic AI phrasing and
-                     enforces short paragraphs + bullet points + H2/H3.
-  3. Cover image   — Pollinations.ai: free, keyless, no hotlinking limits.
-                     The URL itself carries the prompt, so nothing is
-                     downloaded or uploaded — the blog <img> renders it.
-  3b. Content images — up to three more Pollinations images (800x450), one
-                     appended to the end of the first three <h2> sections as
-                     a <figure><img><figcaption>; the URLs are also stored in
-                     blog_posts.content_images (jsonb).
-  4. Save          — supabase-py insert into public.blog_posts with the
+The pipeline is deliberately split into chunks with pauses between them so
+Tavily and Gemini never see a burst of back-to-back calls (avoids 429s):
+
+  1. Research      — Tavily Search in the "AI & Technology" niche.   [5s]
+  2. Keywords      — Gemini distills one trending topic + the top 3-5
+                     SEO keywords from the results. Tavily failure falls
+                     back to a curated niche topic (never crashes).   [5s]
+  3. Meta          — Gemini writes the catchy meta title + meta
+                     description (with plain fallbacks).              [5s]
+  4. Write         — Gemini writes a ~1000-word, SEO-optimised article
+                     as strict JSON (title / excerpt / content_html /
+                     tags). Basic human language; robotic AI phrasing
+                     and keyword stuffing are banned.                 [5s]
+  5. Images        — Pollinations.ai cover + up to three in-article
+                     images (800x450) generated ONE BY ONE with a 3s
+                     pause between each; the URLs are embedded as
+                     <figure> tags and stored in blog_posts.content_images.
+  6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
-Error handling: the whole pipeline is wrapped in try/except — any Tavily,
-Gemini, or database failure is logged as [AutoBlog] and the run exits
-gracefully (returns None) without ever crashing the server.
+Error handling: every chunk is wrapped in try/except — any Tavily, Gemini,
+or database failure is logged as [AutoBlog] and the run exits gracefully
+(returns None) without ever crashing the server.
 
-Async note: clients are created per run on purpose — the route awaits on
-uvicorn's event loop while the scheduler job runs asyncio.run() on its own
-thread loop; no client object may be shared across loops.
+Async note: clients are created per run on purpose — the background task
+and the scheduler job each own their event loop; no client object may be
+shared across loops.
 """
 
 from __future__ import annotations
@@ -56,6 +57,10 @@ MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 
 # How many in-article images to embed (one per H2 section, first N sections).
 MAX_CONTENT_IMAGES = 3
+
+# Deliberate pauses between chunks — keep every provider under its rate limit.
+STEP_PAUSE_SECONDS = 5  # after research / keywords / meta / write
+IMAGE_PAUSE_SECONDS = 3  # between in-article image generations
 
 # Single niche for the daily research query.
 NICHE = "AI & Technology"
@@ -110,6 +115,15 @@ Return ONLY strict JSON (no fences, no commentary):
 
 - topic: a concrete angle a reader would click, max 120 chars.
 - keywords: 3 to 5, each 1-3 words, lowercase, no dupes."""
+
+_META_SYSTEM = """You are an SEO meta-copy expert. From the topic and keywords provided, write ONE catchy meta title and ONE meta description for the blog post.
+
+Return ONLY strict JSON (no fences, no commentary):
+{"meta_title": "...", "meta_description": "..."}
+
+- meta_title: catchy and specific, max 110 chars, may include a number or power word.
+- meta_description: 140-180 chars, contains the primary keyword, entices a click. Plain text only.
+- No em dashes (—) or en dashes (–); use commas or colons instead."""
 
 
 class BlogPipelineError(RuntimeError):
@@ -249,7 +263,7 @@ async def _outline(results: list[dict[str, str]]) -> dict[str, Any]:
             model,
             f"Today's research:\n{blob}",
             temperature=0.3,
-            max_tokens=400,
+            max_tokens=1024,
         )
         return ai_service.extract_json(text, prefer="keywords")
     except Exception as exc:  # noqa: BLE001 - any failure falls back to heuristics
@@ -257,23 +271,25 @@ async def _outline(results: list[dict[str, str]]) -> dict[str, Any]:
         return {}
 
 
-async def _research() -> Research:
+async def _research_chunk() -> list[dict[str, str]]:
+    """Step 1/6: Tavily trending-topic search (raises on failure)."""
     query = f"{NICHE} {_utc().year} trending"
+    raw = await asyncio.to_thread(_tavily_search, query)
+    return [
+        r for r in (_clean_result(item) for item in raw) if r["title"] or r["content"]
+    ]
 
-    raw: list[dict[str, Any]] = []
-    try:
-        raw = await asyncio.to_thread(_tavily_search, query)
-    except Exception as exc:  # noqa: BLE001 - fallback topic covers this
-        print(f"[AutoBlog] Tavily research failed — fallback topic: {exc}")
 
-    results = [r for r in (_clean_result(item) for item in raw) if r["title"] or r["content"]]
+async def _keywords_chunk(results: list[dict[str, str]]) -> Research:
+    """Step 2/6: Gemini picks the topic + top 3-5 keywords from the results.
 
+    Falls back to a curated daily topic when Tavily returned nothing, and to
+    the first headline when Gemini extraction fails.
+    """
     if not results:
-        # Tavily down → curated fallback topic for the day (keeps the run alive).
         topic = FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
-        keywords = _pad_keywords([], topic)
         print(f"[AutoBlog] research fallback -> topic={topic!r}")
-        return Research(topic=topic, keywords=keywords, snippets=[])
+        return Research(topic=topic, keywords=_pad_keywords([], topic), snippets=[])
 
     outline = await _outline(results)
     topic = str(outline.get("topic") or "").strip()
@@ -293,6 +309,36 @@ async def _research() -> Research:
     return Research(topic=topic, keywords=keywords, snippets=snippets)
 
 
+async def _meta_chunk(research: Research) -> tuple[str, str]:
+    """Step 3/6: catchy meta title + meta description (plain fallbacks)."""
+    sources = "\n".join(f"- {s}" for s in research.snippets[:3]) or "(none)"
+    try:
+        model = _gemini_model(_META_SYSTEM)
+        text = await _generate(
+            model,
+            f"Topic: {research.topic}\n"
+            f"Keywords: {', '.join(research.keywords)}\n"
+            f"Research snippets:\n{sources}",
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        data = ai_service.extract_json(text, prefer="meta_title")
+        if isinstance(data, dict):
+            title = str(data.get("meta_title") or "").strip()
+            description = str(data.get("meta_description") or "").strip()
+            if title and description:
+                return title[:300], description[:300]
+        print("[AutoBlog] meta chunk returned incomplete JSON — using fallbacks.")
+    except Exception as exc:  # noqa: BLE001 - fallback keeps the run alive
+        print(f"[AutoBlog] meta generation failed: {type(exc).__name__}: {exc}")
+    fallback_desc = (
+        research.snippets[0][:170].rstrip() + "…"
+        if research.snippets
+        else research.topic
+    )
+    return research.topic[:300], fallback_desc
+
+
 # ────────────────────────────── Stage 2 · Write ───────────────────────────────
 
 
@@ -305,7 +351,10 @@ async def _write_article(research: Research) -> dict[str, Any]:
         f"Today's research (ground the article in these, link 2-3 inline):\n"
         f"{sources}\n\n"
         "Write the article now — remember: banned words fail the brief, "
-        "short paragraphs, bullet points, engaging H2/H3 headings, ~1000 words."
+        "short paragraphs, bullet points, engaging H2/H3 headings, ~1000 words. "
+        "Write in basic, simple, human-like language. Avoid robotic AI words "
+        "(delve, moreover, testament). Avoid keyword stuffing. Naturally place "
+        "the extracted keywords. 100% unique, no plagiarism."
     )
 
     model = _gemini_model(_WRITER_SYSTEM)
@@ -430,6 +479,50 @@ def _embed_content_images(
     return "".join(out), images
 
 
+async def _images_chunk(
+    content_html: str, keywords: list[str]
+) -> tuple[str, list[dict[str, str]]]:
+    """Step 5/6: Pollinations images ONE BY ONE (pause between each).
+
+    Same embedding rules as _embed_content_images — one figure at the end of
+    each of the first MAX_CONTENT_IMAGES <h2> sections; a single image after
+    the first paragraph when the article has no <h2> at all.
+    """
+    parts = _H2_RE.split(content_html)
+    if len(parts) < 3:
+        caption = _TAG_RE.sub(" ", parts[0])[:120].strip() or "Article illustration"
+        keyword = keywords[0] if keywords else "technology"
+        url = _content_image_url(caption, keyword)
+        await asyncio.sleep(IMAGE_PAUSE_SECONDS)
+        figure = _figure_html(url, caption)
+        if "</p>" in content_html:
+            head, tail = content_html.split("</p>", 1)
+            html_out = f"{head}</p>{figure}{tail}"
+        else:
+            html_out = f"{content_html}{figure}"
+        return html_out, [{"url": url, "caption": caption}]
+
+    images: list[dict[str, str]] = []
+    out: list[str] = [parts[0]]
+    for section, i in enumerate(range(1, len(parts), 2)):
+        h2 = parts[i]
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        if section < MAX_CONTENT_IMAGES and keywords:
+            caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
+            url = _content_image_url(caption, keywords[section % len(keywords)])
+            if images:
+                await asyncio.sleep(IMAGE_PAUSE_SECONDS)
+            print(
+                f"[AutoBlog] content image {len(images) + 1}/{MAX_CONTENT_IMAGES} "
+                f"ready: {caption!r}"
+            )
+            body = f"{body}{_figure_html(url, caption)}"
+            images.append({"url": url, "caption": caption})
+        out.append(h2)
+        out.append(body)
+    return "".join(out), images
+
+
 # ────────────────────────────── Stage 4 · Save ────────────────────────────────
 
 
@@ -475,62 +568,139 @@ def _insert_post(payload: dict[str, Any]) -> dict[str, Any]:
     raise BlogPipelineError(f"Supabase insert failed: {last_error}") from last_error
 
 
-# ──────────────────────────────── Orchestrator ────────────────────────────────
+# ──────────────────────── Staggered background orchestrator ──────────────────
 
 
-async def run_pipeline() -> dict[str, Any] | None:
-    """Run all four stages once.
+def is_run_active() -> bool:
+    """True while a pipeline run holds the lock (route 409 pre-check)."""
+    return _RUN_LOCK.locked()
 
-    Returns the saved row plus research metadata, or None when any stage
-    failed — the error is logged ([AutoBlog] …) and the run exits
-    gracefully without ever raising out to the caller (except a 409 when a
-    run is already in progress).
+
+async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
+    """Staggered 6-chunk pipeline with deliberate API pauses (never raises).
+
+    Designed to run inside a FastAPI BackgroundTask: each chunk is wrapped in
+    its own try/except, logs a [AutoBlog] Step N/6 line, and pauses before
+    the next call so Tavily / Gemini stay under their rate limits.
+
+    Returns the saved row plus research metadata, or None when any chunk
+    failed — the run aborts gracefully without ever crashing the server.
     """
     if not _RUN_LOCK.acquire(blocking=False):
-        raise BlogPipelineError(
-            "A blog generation run is already in progress.", status_code=409
-        )
+        print("[AutoBlog] a run is already in progress — staggered run skipped.")
+        return None
     try:
+        print(f"[AutoBlog] staggered pipeline start {_utc().isoformat(timespec='seconds')}")
+
+        # Step 1/6 — Research (Tavily).
         try:
-            started = _utc().isoformat(timespec="seconds")
-            print(f"[AutoBlog] pipeline start {started}")
+            results = await _research_chunk()
+            print(
+                f"[AutoBlog] Step 1/6: Research complete ({len(results)} results). "
+                f"Waiting {STEP_PAUSE_SECONDS}s..."
+            )
+        except Exception as exc:  # noqa: BLE001 - curated fallback keeps the run alive
+            results = []
+            print(
+                f"[AutoBlog] Step 1/6: Research failed "
+                f"({type(exc).__name__}: {exc}); fallback topic. "
+                f"Waiting {STEP_PAUSE_SECONDS}s..."
+            )
+        await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-            research = await _research()
-            print(f"[AutoBlog] topic={research.topic!r} keywords={research.keywords}")
+        # Step 2/6 — Keyword extraction (Gemini).
+        try:
+            research = await _keywords_chunk(results)
+            print(
+                f"[AutoBlog] Step 2/6: Keywords complete "
+                f"({', '.join(research.keywords)}). Waiting {STEP_PAUSE_SECONDS}s..."
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[AutoBlog] Step 2/6: Keywords failed "
+                f"({type(exc).__name__}: {exc}). Aborting run."
+            )
+            return None
+        await asyncio.sleep(STEP_PAUSE_SECONDS)
 
+        # Step 3/6 — Meta title + description (Gemini).
+        try:
+            meta_title, meta_description = await _meta_chunk(research)
+            print(f"[AutoBlog] Step 3/6: Meta data complete. Waiting {STEP_PAUSE_SECONDS}s...")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[AutoBlog] Step 3/6: Meta failed "
+                f"({type(exc).__name__}: {exc}). Aborting run."
+            )
+            return None
+        await asyncio.sleep(STEP_PAUSE_SECONDS)
+
+        # Step 4/6 — Article writing (Gemini).
+        try:
             article = await _write_article(research)
-            content_html, content_images = _embed_content_images(
+            print(f"[AutoBlog] Step 4/6: Article written. Waiting {STEP_PAUSE_SECONDS}s...")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[AutoBlog] Step 4/6: Writing failed "
+                f"({type(exc).__name__}: {exc}). Aborting run."
+            )
+            return None
+        await asyncio.sleep(STEP_PAUSE_SECONDS)
+
+        # Step 5/6 — Images (Pollinations, one by one).
+        try:
+            content_html, content_images = await _images_chunk(
                 article["content_html"], research.keywords
             )
-            print(f"[AutoBlog] embedded {len(content_images)} content image(s)")
-            cover = _cover_image_url(article["title"], research.keywords)
-            print(f"[AutoBlog] cover image: {cover[:110]}")
+            cover = _cover_image_url(meta_title, research.keywords)
+            print(
+                f"[AutoBlog] Step 5/6: Images complete "
+                f"({len(content_images)} in-article + cover)."
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[AutoBlog] Step 5/6: Images failed "
+                f"({type(exc).__name__}: {exc}). Aborting run."
+            )
+            return None
 
+        # Step 6/6 — Upload (Supabase).
+        try:
             payload = {
-                "slug_base": slugify(article["title"]),
-                "title": article["title"],
+                "slug_base": slugify(meta_title),
+                "title": meta_title,
                 "content": content_html,
-                "excerpt": article["excerpt"],
+                "excerpt": meta_description,
                 "cover_image_url": cover,
                 "content_images": content_images,
                 "tags": article["tags"],
                 "keywords": research.keywords,
             }
             post = await asyncio.to_thread(_insert_post, payload)
-
-            print(f"[AutoBlog] saved post id={post.get('id')} slug={post.get('slug')}")
+            print(
+                f"[AutoBlog] Step 6/6: Saved post id={post.get('id')} "
+                f"slug={post.get('slug')}"
+            )
             return {"post": post, "topic": research.topic, "keywords": research.keywords}
-        except Exception as exc:  # noqa: BLE001 - log + graceful exit, never crash
-            print(f"[AutoBlog] pipeline aborted: {type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[AutoBlog] Step 6/6: Upload failed "
+                f"({type(exc).__name__}: {exc}). Aborting run."
+            )
             return None
     finally:
         _RUN_LOCK.release()
 
 
+async def run_pipeline() -> dict[str, Any] | None:
+    """Backwards-compatible alias — runs the staggered pipeline."""
+    return await run_staggered_blog_pipeline()
+
+
 def run_scheduled_job() -> None:
     """APScheduler entry point (runs on a worker thread — owns its own loop)."""
     try:
-        result = asyncio.run(run_pipeline())
+        result = asyncio.run(run_staggered_blog_pipeline())
         if result:
             print(f"[AutoBlog] scheduled run OK -> /blog/{result['post'].get('slug')}")
         else:
