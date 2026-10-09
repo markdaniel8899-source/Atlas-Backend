@@ -811,12 +811,12 @@ async def _content_image_url(section_title: str, keyword: str) -> str:
 
 
 def _figure_html(url: str, caption: str) -> str:
-    """<figure> with the image only — caption text stays in the DB metadata,
-    it is NOT rendered under the image (alt text keeps it for SEO/a11y)."""
+    """Plain <img> — no <figure> wrapper box; caption text stays in the DB
+    metadata and the alt attribute (nothing is rendered under the image)."""
     alt = html.escape(caption, quote=True)
     return (
-        f'<figure><img src="{url}" alt="{alt}" loading="lazy" '
-        'width="800" height="450" /></figure>'
+        f'<img src="{url}" alt="{alt}" loading="lazy" '
+        'width="800" height="450" />'
     )
 
 

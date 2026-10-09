@@ -232,13 +232,14 @@ class TestImagesChunk(unittest.TestCase):
         )
         out, images = _run_images_chunk(html_in, ["ai", "learning"])
         self.assertEqual(len(images), auto_blog.MAX_CONTENT_IMAGES)
-        self.assertEqual(out.count("<figure>"), auto_blog.MAX_CONTENT_IMAGES)
-        # Captions are NOT rendered under images — only the <img> itself.
+        # Plain <img> tags — no <figure> wrapper box, no captions rendered.
+        self.assertEqual(out.count("<img "), auto_blog.MAX_CONTENT_IMAGES)
         self.assertNotIn("<figcaption>", out)
+        self.assertNotIn("<figure>", out)
         # Fourth section stays image-free.
         self.assertIn("<h2>Section Four</h2><p>Body four.</p>", out)
-        # Figure sits at the END of its section (before the next <h2>).
-        self.assertIn("</p><figure>", out)
+        # Image sits at the END of its section (before the next <h2>).
+        self.assertIn("</p><img", out)
         self.assertEqual(images[0]["caption"], "Section One")
 
     def test_uses_pixabay_url_when_available(self):
@@ -267,8 +268,8 @@ class TestImagesChunk(unittest.TestCase):
         html_in = "<p>First para.</p><p>Second para.</p>"
         out, images = _run_images_chunk(html_in, ["ai"])
         self.assertEqual(len(images), 1)
-        self.assertEqual(out.count("<figure>"), 1)
-        self.assertIn("</p><figure>", out)
+        self.assertEqual(out.count("<img "), 1)
+        self.assertIn("</p><img", out)
 
     def test_captions_are_escaped(self):
         html_in = '<h2>Tom & Jerry\'s "Study" <Guide></h2><p>x</p>'
