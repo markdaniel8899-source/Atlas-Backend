@@ -13,7 +13,9 @@ HYBRID MODEL ROUTING — every provider does what it is best at:
                  and the main article.                         [steps 3-4]
   - Gemini     : automatic fallback for steps 3-4 ONLY when
                  Groq returns 429 (rate limit) or 5xx.         [steps 3-4]
-  - Pollinations.ai : cover + in-article images (keyless).     [step 5]
+  - Pixabay    : cover + in-article photos via the Pixabay API
+                 (PIXABAY_API_KEY). Pollinations.ai URL is the
+                 per-image fallback when Pixabay has no hits.   [step 5]
   - Supabase   : save the finished post.                       [step 6]
 
 The pipeline is deliberately split into chunks with pauses between them so
@@ -29,10 +31,11 @@ no provider sees a burst of back-to-back calls (avoids 429s):
   4. Write         — Groq writes a ~1000-word, SEO-optimised article
                      as strict JSON (title / excerpt / content_html /
                      tags); same Gemini retry on 429/5xx.         [3s]
-  5. Images        — Pollinations.ai cover + up to three in-article
-                     images (800x450) generated ONE BY ONE with a 3s
-                     pause between each; the URLs are embedded as
-                     <figure> tags and stored in blog_posts.content_images.
+  5. Images        — Pixabay cover + up to three in-article photos,
+                     fetched ONE BY ONE with a 3s pause between each
+                     (Pollinations URL fallback per image). The URLs
+                     are embedded as <figure> tags and stored in
+                     blog_posts.content_images.
   6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
@@ -65,6 +68,7 @@ from functools import lru_cache
 from typing import Any
 
 import google.generativeai as genai
+import httpx
 import requests
 from supabase import Client, create_client
 from tavily import TavilyClient
@@ -97,6 +101,12 @@ NVIDIA_API_URL = os.getenv(
 NVIDIA_MODEL = os.getenv(
     "NVIDIA_BLOG_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
 ).strip()
+
+# ── Pixabay (blog photos: cover + in-article) ────────────────────────────────
+# Free API key from https://pixabay.com/api/docs/. Read AFTER
+# `from app.config import get_settings` so load_dotenv() has already
+# populated os.environ from backend/.env.
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 
 MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 
@@ -632,11 +642,58 @@ async def _write_article(research: Research) -> dict[str, Any]:
     return {"title": title, "excerpt": excerpt, "content_html": content_html, "tags": tags}
 
 
-# ───────────────────────── Stage 3 · Cover image (Pollinations) ──────────────
+# ─────────────── Stage 3 · Cover + in-article images (Pixabay first) ─────────
 
 
-def _cover_image_url(title: str, keywords: list[str]) -> str:
-    """Pollinations.ai — free, NO API key, no hotlinking restrictions.
+async def fetch_relevant_image(keywords: str) -> str | None:
+    """Fetch a relevant photo from Pixabay using article keywords.
+
+    Pixabay auto-serves WebP to supporting browsers, so only the image URL
+    is stored (no image data travels through the DB). Returns None on any
+    failure (no key, no hits, network error) — the caller falls back to a
+    Pollinations URL so the pipeline never dies on images.
+    """
+    if not PIXABAY_API_KEY:
+        return None
+    query = (keywords or "").strip()
+    if not query:
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://pixabay.com/api/",
+                params={
+                    "key": PIXABAY_API_KEY,
+                    "q": query,
+                    "image_type": "photo",
+                    "orientation": "horizontal",
+                    "safesearch": "true",
+                    "min_width": 1280,
+                    "per_page": 1,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+        hits = data.get("hits") if isinstance(data, dict) else None
+        if hits:
+            # largeImageURL — Pixabay auto-serves WebP to supporting browsers.
+            url = str(hits[0].get("largeImageURL") or "").strip()
+            if url:
+                print(f"[AutoBlog] Pixabay image OK for {query!r}", flush=True)
+                return url
+        print(f"[AutoBlog] Pixabay no hits for {query!r} — using fallback.", flush=True)
+    except Exception as exc:  # noqa: BLE001 - fallback keeps the run alive
+        print(
+            f"[AutoBlog] Pixabay fetch failed ({type(exc).__name__}: {exc}) "
+            "— using fallback.",
+            flush=True,
+        )
+    return None
+
+
+def _pollinations_cover_url(title: str, keywords: list[str]) -> str:
+    """Pollinations.ai FALLBACK cover (keyless) when Pixabay has no hit.
 
     The prompt lives inside the URL, so the image is generated lazily the
     first time the blog <img> is requested. Nothing is downloaded/uploaded.
@@ -654,14 +711,27 @@ _H2_RE = re.compile(r"(<h2[^>]*>.*?</h2>)", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _content_image_url(section_title: str, keyword: str) -> str:
-    """Pollinations URL for an in-article image (800x450, same lazy pattern)."""
+def _pollinations_content_url(section_title: str, keyword: str) -> str:
+    """Pollinations.ai FALLBACK in-article image when Pixabay has no hit."""
     prompt = f"{section_title[:120]}, {keyword}, cinematic, high quality"
     encoded = urllib.parse.quote(prompt, safe="")
     return (
         f"https://image.pollinations.ai/prompt/{encoded}"
         "?width=800&height=450&nologo=true"
     )
+
+
+async def _cover_image_url(title: str, keywords: list[str]) -> str:
+    """Pixabay first (up to 3 keywords in the query); Pollinations fallback."""
+    query = " ".join(keywords[:3]) if keywords else title.split(":")[0]
+    url = await fetch_relevant_image(query)
+    return url or _pollinations_cover_url(title, keywords)
+
+
+async def _content_image_url(section_title: str, keyword: str) -> str:
+    """Pixabay first for the section keyword; Pollinations fallback."""
+    url = await fetch_relevant_image(keyword) if keyword else None
+    return url or _pollinations_content_url(section_title, keyword)
 
 
 def _figure_html(url: str, caption: str) -> str:
@@ -674,57 +744,21 @@ def _figure_html(url: str, caption: str) -> str:
     )
 
 
-def _embed_content_images(
-    content_html: str, keywords: list[str]
-) -> tuple[str, list[dict[str, str]]]:
-    """Append one <figure> image to the end of the first few <h2> sections.
-
-    Returns the updated HTML plus the metadata stored in
-    blog_posts.content_images. Articles with no <h2> at all get a single
-    image right after the first paragraph instead.
-    """
-    parts = _H2_RE.split(content_html)
-    if len(parts) < 3:
-        caption = _TAG_RE.sub(" ", parts[0])[:120].strip() or "Article illustration"
-        keyword = keywords[0] if keywords else "technology"
-        url = _content_image_url(caption, keyword)
-        figure = _figure_html(url, caption)
-        if "</p>" in content_html:
-            head, tail = content_html.split("</p>", 1)
-            html_out = f"{head}</p>{figure}{tail}"
-        else:
-            html_out = f"{content_html}{figure}"
-        return html_out, [{"url": url, "caption": caption}]
-
-    images: list[dict[str, str]] = []
-    out: list[str] = [parts[0]]
-    for section, i in enumerate(range(1, len(parts), 2)):
-        h2 = parts[i]
-        body = parts[i + 1] if i + 1 < len(parts) else ""
-        if section < MAX_CONTENT_IMAGES and keywords:
-            caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
-            url = _content_image_url(caption, keywords[section % len(keywords)])
-            body = f"{body}{_figure_html(url, caption)}"
-            images.append({"url": url, "caption": caption})
-        out.append(h2)
-        out.append(body)
-    return "".join(out), images
-
-
 async def _images_chunk(
     content_html: str, keywords: list[str]
 ) -> tuple[str, list[dict[str, str]]]:
-    """Step 5/6: Pollinations images ONE BY ONE (pause between each).
+    """Step 5/6: Pixabay images ONE BY ONE (pause between each).
 
-    Same embedding rules as _embed_content_images — one figure at the end of
-    each of the first MAX_CONTENT_IMAGES <h2> sections; a single image after
-    the first paragraph when the article has no <h2> at all.
+    One figure at the end of each of the first MAX_CONTENT_IMAGES <h2>
+    sections; a single image after the first paragraph when the article
+    has no <h2> at all. Every image falls back to a Pollinations URL when
+    Pixabay returns nothing.
     """
     parts = _H2_RE.split(content_html)
     if len(parts) < 3:
         caption = _TAG_RE.sub(" ", parts[0])[:120].strip() or "Article illustration"
         keyword = keywords[0] if keywords else "technology"
-        url = _content_image_url(caption, keyword)
+        url = await _content_image_url(caption, keyword)
         await asyncio.sleep(IMAGE_PAUSE_SECONDS)
         figure = _figure_html(url, caption)
         if "</p>" in content_html:
@@ -741,7 +775,9 @@ async def _images_chunk(
         body = parts[i + 1] if i + 1 < len(parts) else ""
         if section < MAX_CONTENT_IMAGES and keywords:
             caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
-            url = _content_image_url(caption, keywords[section % len(keywords)])
+            url = await _content_image_url(
+                caption, keywords[section % len(keywords)]
+            )
             if images:
                 await asyncio.sleep(IMAGE_PAUSE_SECONDS)
             print(
@@ -943,17 +979,17 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 return None
             await asyncio.sleep(WRITE_PAUSE_SECONDS)
 
-            # Step 5/6 — Images (Pollinations, one by one).
+            # Step 5/6 — Images (Pixabay → Pollinations fallback, one by one).
             print(
-                "[AutoBlog Background] Step 5: Generating images "
-                "(Pollinations)...",
+                "[AutoBlog Background] Step 5: Fetching images "
+                "(Pixabay, fallback Pollinations)...",
                 flush=True,
             )
             try:
                 content_html, content_images = await _images_chunk(
                     article["content_html"], research.keywords
                 )
-                cover = _cover_image_url(meta_title, research.keywords)
+                cover = await _cover_image_url(meta_title, research.keywords)
                 print(
                     f"[AutoBlog Background] Step 5/6: Images complete "
                     f"({len(content_images)} in-article + cover).",

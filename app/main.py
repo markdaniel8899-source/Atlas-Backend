@@ -122,9 +122,9 @@ def create_app() -> FastAPI:
         """Kick off the staggered HYBRID Auto Blog pipeline in the background
         (returns 202 immediately — the work runs as a FastAPI BackgroundTask):
         Tavily research + Nemotron Ultra topic/keywords → Groq meta + article
-        (automatic Gemini fallback on Groq 429/5xx) → Pollinations images
-        (one by one, with pauses) → Supabase save. The pauses keep every
-        provider under its rate limit, so the run takes a few minutes.
+        (automatic Gemini fallback on Groq 429/5xx) → Pixabay photos
+        (one by one, Pollinations URL fallback) → Supabase save. The pauses
+        keep every provider under its rate limit, so the run takes a few minutes.
         """
         if not settings.blog_ready:
             raise auto_blog.BlogPipelineError(

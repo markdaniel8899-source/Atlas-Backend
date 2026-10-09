@@ -23,14 +23,93 @@ class TestSlugify(unittest.TestCase):
             self.assertRegex(auto_blog.slugify(title), pat)
 
 
+def _fake_pixabay_client(hits):
+    """Build a mock httpx.AsyncClient context manager returning `hits`."""
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {"hits": hits}
+    client = mock.MagicMock()
+    client.get = mock.AsyncMock(return_value=response)
+    cm = mock.MagicMock()
+    cm.__aenter__ = mock.AsyncMock(return_value=client)
+    cm.__aexit__ = mock.AsyncMock(return_value=False)
+    return client, cm
+
+
+class TestFetchRelevantImage(unittest.TestCase):
+    def test_missing_key_returns_none(self):
+        with mock.patch.object(auto_blog, "PIXABAY_API_KEY", ""):
+            result = asyncio.run(auto_blog.fetch_relevant_image("ai education"))
+        self.assertIsNone(result)
+
+    def test_empty_query_returns_none(self):
+        with mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"):
+            result = asyncio.run(auto_blog.fetch_relevant_image("   "))
+        self.assertIsNone(result)
+
+    def test_returns_large_image_url(self):
+        client, cm = _fake_pixabay_client(
+            [{"largeImageURL": "https://cdn.pixabay.com/photo/1-large.jpg"}]
+        )
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(auto_blog.fetch_relevant_image("ai education"))
+        self.assertEqual(url, "https://cdn.pixabay.com/photo/1-large.jpg")
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["q"], "ai education")
+        self.assertEqual(params["image_type"], "photo")
+        self.assertEqual(params["orientation"], "horizontal")
+        self.assertEqual(params["per_page"], 1)
+
+    def test_http_error_returns_none(self):
+        client, cm = _fake_pixabay_client([])
+        client.get.side_effect = RuntimeError("boom")
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(auto_blog.fetch_relevant_image("ai"))
+        self.assertIsNone(url)
+
+    def test_no_hits_returns_none(self):
+        _, cm = _fake_pixabay_client([])
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(auto_blog.fetch_relevant_image("ai"))
+        self.assertIsNone(url)
+
+
 class TestCoverImageUrl(unittest.TestCase):
-    def test_format_matches_spec(self):
-        url = auto_blog._cover_image_url("Future of AI", ["ai education"])
+    def test_pixabay_hit_wins(self):
+        with mock.patch.object(
+            auto_blog,
+            "fetch_relevant_image",
+            mock.AsyncMock(return_value="https://cdn.pixabay.com/cover.jpg"),
+        ):
+            url = asyncio.run(
+                auto_blog._cover_image_url("Future of AI", ["ai education"])
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/cover.jpg")
+
+    def test_falls_back_to_pollinations(self):
+        with mock.patch.object(
+            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
+        ):
+            url = asyncio.run(
+                auto_blog._cover_image_url("Future of AI", ["ai education"])
+            )
         self.assertTrue(url.startswith("https://image.pollinations.ai/prompt/"))
         self.assertEqual(url.split("?", 1)[1], "width=1200&height=630&nologo=true")
 
-    def test_prompt_is_url_encoded(self):
-        url = auto_blog._cover_image_url("A, B & C?", [])
+    def test_fallback_prompt_is_url_encoded(self):
+        with mock.patch.object(
+            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
+        ):
+            url = asyncio.run(auto_blog._cover_image_url("A, B & C?", []))
         prompt = url.split("/prompt/", 1)[1].split("?", 1)[0]
         self.assertNotIn(" ", prompt)
         self.assertNotIn("&", prompt)
@@ -38,10 +117,33 @@ class TestCoverImageUrl(unittest.TestCase):
 
 class TestContentImageHelpers(unittest.TestCase):
     def test_content_image_url_format(self):
-        url = auto_blog._content_image_url("Focus techniques", "deep work")
+        url = auto_blog._pollinations_content_url("Focus techniques", "deep work")
         self.assertTrue(url.startswith("https://image.pollinations.ai/prompt/"))
         self.assertEqual(url.split("?", 1)[1], "width=800&height=450&nologo=true")
 
+    def test_pixabay_hit_wins(self):
+        with mock.patch.object(
+            auto_blog,
+            "fetch_relevant_image",
+            mock.AsyncMock(return_value="https://cdn.pixabay.com/inline.jpg"),
+        ):
+            url = asyncio.run(
+                auto_blog._content_image_url("Focus techniques", "deep work")
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/inline.jpg")
+
+
+def _run_images_chunk(html_in, keywords, image_url=None):
+    with (
+        mock.patch.object(auto_blog, "IMAGE_PAUSE_SECONDS", 0),
+        mock.patch.object(
+            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=image_url)
+        ),
+    ):
+        return asyncio.run(auto_blog._images_chunk(html_in, keywords))
+
+
+class TestImagesChunk(unittest.TestCase):
     def test_embeds_one_figure_per_h2(self):
         html_in = (
             "<p>Intro paragraph.</p>"
@@ -50,7 +152,7 @@ class TestContentImageHelpers(unittest.TestCase):
             "<h2>Section Three</h2><p>Body three.</p>"
             "<h2>Section Four</h2><p>Body four.</p>"
         )
-        out, images = auto_blog._embed_content_images(html_in, ["ai", "learning"])
+        out, images = _run_images_chunk(html_in, ["ai", "learning"])
         self.assertEqual(len(images), auto_blog.MAX_CONTENT_IMAGES)
         self.assertEqual(out.count("<figure>"), auto_blog.MAX_CONTENT_IMAGES)
         self.assertEqual(out.count("<figcaption>"), auto_blog.MAX_CONTENT_IMAGES)
@@ -58,20 +160,40 @@ class TestContentImageHelpers(unittest.TestCase):
         self.assertIn("<h2>Section Four</h2><p>Body four.</p>", out)
         # Figure sits at the END of its section (before the next <h2>).
         self.assertIn("</p><figure>", out)
-        self.assertIn("width=800&height=450&nologo=true", out)
         self.assertEqual(images[0]["caption"], "Section One")
+
+    def test_uses_pixabay_url_when_available(self):
+        html_in = (
+            "<h2>Section One</h2><p>Body one.</p>"
+            "<h2>Section Two</h2><p>Body two.</p>"
+        )
+        out, images = _run_images_chunk(
+            html_in, ["ai"], image_url="https://cdn.pixabay.com/x.jpg"
+        )
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0]["url"], "https://cdn.pixabay.com/x.jpg")
+        self.assertIn('src="https://cdn.pixabay.com/x.jpg"', out)
+
+    def test_falls_back_to_pollinations_per_image(self):
+        html_in = (
+            "<h2>Section One</h2><p>Body one.</p>"
+            "<h2>Section Two</h2><p>Body two.</p>"
+        )
+        out, images = _run_images_chunk(html_in, ["ai"], image_url=None)
+        self.assertEqual(len(images), 2)
+        self.assertIn("width=800&height=450&nologo=true", out)
         self.assertIn("Section%20One", images[0]["url"])
 
     def test_no_h2_appends_single_image(self):
         html_in = "<p>First para.</p><p>Second para.</p>"
-        out, images = auto_blog._embed_content_images(html_in, ["ai"])
+        out, images = _run_images_chunk(html_in, ["ai"])
         self.assertEqual(len(images), 1)
         self.assertEqual(out.count("<figure>"), 1)
         self.assertIn("</p><figure>", out)
 
     def test_captions_are_escaped(self):
         html_in = '<h2>Tom & Jerry\'s "Study" <Guide></h2><p>x</p>'
-        out, images = auto_blog._embed_content_images(html_in, ["ai"])
+        out, images = _run_images_chunk(html_in, ["ai"])
         self.assertEqual(len(images), 1)
         # "<Guide>" is tag-stripped from the caption, then entities are escaped.
         self.assertIn("<figcaption>Tom &amp; Jerry&#x27;s &quot;Study&quot;</figcaption>", out)
@@ -80,7 +202,7 @@ class TestContentImageHelpers(unittest.TestCase):
 
     def test_empty_keywords_skips_images(self):
         html_in = "<h2>Only</h2><p>x</p>"
-        out, images = auto_blog._embed_content_images(html_in, [])
+        out, images = _run_images_chunk(html_in, [])
         self.assertEqual(images, [])
         self.assertNotIn("<figure>", out)
 
