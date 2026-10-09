@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -12,6 +13,14 @@ from app import ai_service
 from app.config import get_settings
 from app.routers import chat, quizzes, roadmaps
 from app.services import auto_blog
+
+# Background-task logs go to stdout (the nohup log). A non-tty stdout is
+# block-buffered, so those prints never appeared next to uvicorn's 202 line.
+# Line-buffer so every print flushes immediately.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:  # noqa: BLE001 - stdout swapped by a test harness → skip
+    pass
 
 REQUIRED_ORIGINS = [
     "http://localhost:5173",
@@ -125,6 +134,12 @@ def create_app() -> FastAPI:
                 "A blog generation run is already in progress.", status_code=409
             )
         background_tasks.add_task(auto_blog.run_staggered_blog_pipeline)
+        print(
+            "[AutoBlog Background] POST /api/blog/generate -> task queued "
+            "(run_staggered_blog_pipeline). Next log line MUST be "
+            "'[AutoBlog Background]  TASK STARTED EXECUTION!'.",
+            flush=True,
+        )
         return {
             "status": "success",
             "message": (

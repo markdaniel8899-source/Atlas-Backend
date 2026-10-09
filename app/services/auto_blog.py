@@ -48,6 +48,7 @@ import asyncio
 import html
 import os
 import re
+import sys
 import threading
 import uuid
 import urllib.parse
@@ -64,6 +65,16 @@ from tavily import TavilyClient
 
 from app import ai_service
 from app.config import get_settings
+
+# Every print() in this module goes to stdout, which `nohup ... > server.log`
+# captures. Non-tty stdout is BLOCK-buffered (8KB), so step logs sat in the
+# buffer and never showed up next to uvicorn's stderr access log ("202
+# Accepted") — the task ran but looked dead. Line-buffering makes each print
+# hit the log file immediately.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:  # noqa: BLE001 - stdout swapped by a test harness → skip
+    pass
 
 # ── NVIDIA NIM (hybrid pipeline: all chunks EXCEPT article writing) ──────────
 # OpenAI-compatible endpoint at integrate.api.nvidia.com. Free-tier friendly.
@@ -647,117 +658,194 @@ def is_run_active() -> bool:
 async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
     """Staggered 6-chunk pipeline with deliberate API pauses (never raises).
 
-    Designed to run inside a FastAPI BackgroundTask: each chunk is wrapped in
-    its own try/except, logs a [AutoBlog] Step N/6 line, and pauses before
-    the next call so Tavily / Gemini stay under their rate limits.
+    Designed to run inside a FastAPI BackgroundTask:
+      - the FIRST line prints "TASK STARTED EXECUTION!" so we can prove the
+        task actually entered the coroutine,
+      - the ENTIRE body is wrapped in one try/except that prints
+        "CRITICAL TASK ERROR" + a traceback, so nothing can die silently,
+      - every step logs a [AutoBlog Background] Step N line (flushed
+        immediately) before and after the call,
+      - sleeps use `asyncio.sleep` only (this is an `async def` running on
+        the event loop — `time.sleep` here would block every request).
 
     Returns the saved row plus research metadata, or None when any chunk
     failed — the run aborts gracefully without ever crashing the server.
     """
-    if not _RUN_LOCK.acquire(blocking=False):
-        print("[AutoBlog] a run is already in progress — staggered run skipped.")
-        return None
+    print("[AutoBlog Background]  TASK STARTED EXECUTION!", flush=True)
     try:
-        print(f"[AutoBlog] staggered pipeline start {_utc().isoformat(timespec='seconds')}")
-
-        # Step 1/6 — Research (Tavily).
-        try:
-            results = await _research_chunk()
+        if not _RUN_LOCK.acquire(blocking=False):
             print(
-                f"[AutoBlog] Step 1/6: Research complete ({len(results)} results). "
-                f"Waiting {STEP_PAUSE_SECONDS}s..."
-            )
-        except Exception as exc:  # noqa: BLE001 - curated fallback keeps the run alive
-            results = []
-            print(
-                f"[AutoBlog] Step 1/6: Research failed "
-                f"({type(exc).__name__}: {exc}); fallback topic. "
-                f"Waiting {STEP_PAUSE_SECONDS}s..."
-            )
-        await asyncio.sleep(STEP_PAUSE_SECONDS)
-
-        # Step 2/6 — Keyword extraction (NVIDIA NIM).
-        try:
-            research = await _keywords_chunk(results)
-            print(
-                f"[AutoBlog] Step 2/6: Keywords complete "
-                f"({', '.join(research.keywords)}). Waiting {STEP_PAUSE_SECONDS}s..."
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[AutoBlog] Step 2/6: Keywords failed "
-                f"({type(exc).__name__}: {exc}). Aborting run."
+                "[AutoBlog Background] a run is already in progress — "
+                "staggered run skipped.",
+                flush=True,
             )
             return None
-        await asyncio.sleep(STEP_PAUSE_SECONDS)
-
-        # Step 3/6 — Meta title + description (NVIDIA NIM).
         try:
-            meta_title, meta_description = await _meta_chunk(research)
-            print(f"[AutoBlog] Step 3/6: Meta data complete. Waiting {STEP_PAUSE_SECONDS}s...")
-        except Exception as exc:  # noqa: BLE001
             print(
-                f"[AutoBlog] Step 3/6: Meta failed "
-                f"({type(exc).__name__}: {exc}). Aborting run."
+                f"[AutoBlog Background] staggered pipeline start "
+                f"{_utc().isoformat(timespec='seconds')}",
+                flush=True,
             )
-            return None
-        await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-        # Step 4/6 — Article writing (Gemini).
-        try:
-            article = await _write_article(research)
-            print(f"[AutoBlog] Step 4/6: Article written. Waiting {STEP_PAUSE_SECONDS}s...")
-        except Exception as exc:  # noqa: BLE001
+            # Step 1/6 — Research (Tavily).
             print(
-                f"[AutoBlog] Step 4/6: Writing failed "
-                f"({type(exc).__name__}: {exc}). Aborting run."
+                "[AutoBlog Background] Step 1: Starting research (Tavily)...",
+                flush=True,
             )
-            return None
-        await asyncio.sleep(STEP_PAUSE_SECONDS)
+            try:
+                results = await _research_chunk()
+                print(
+                    f"[AutoBlog Background] Step 1/6: Research complete "
+                    f"({len(results)} results). "
+                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - curated fallback keeps the run alive
+                results = []
+                print(
+                    f"[AutoBlog Background] Step 1/6: Research failed "
+                    f"({type(exc).__name__}: {exc}); fallback topic. "
+                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-        # Step 5/6 — Images (Pollinations, one by one).
-        try:
-            content_html, content_images = await _images_chunk(
-                article["content_html"], research.keywords
-            )
-            cover = _cover_image_url(meta_title, research.keywords)
+            # Step 2/6 — Keyword extraction (NVIDIA NIM).
             print(
-                f"[AutoBlog] Step 5/6: Images complete "
-                f"({len(content_images)} in-article + cover)."
+                "[AutoBlog Background] Step 2: Extracting keywords "
+                "(NVIDIA NIM)...",
+                flush=True,
             )
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[AutoBlog] Step 5/6: Images failed "
-                f"({type(exc).__name__}: {exc}). Aborting run."
-            )
-            return None
+            try:
+                research = await _keywords_chunk(results)
+                print(
+                    f"[AutoBlog Background] Step 2/6: Keywords complete "
+                    f"({', '.join(research.keywords)}). "
+                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[AutoBlog Background] Step 2/6: Keywords failed "
+                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    flush=True,
+                )
+                return None
+            await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-        # Step 6/6 — Upload (Supabase).
-        try:
-            payload = {
-                "slug_base": slugify(meta_title),
-                "title": meta_title,
-                "content": content_html,
-                "excerpt": meta_description,
-                "cover_image_url": cover,
-                "content_images": content_images,
-                "tags": article["tags"],
-                "keywords": research.keywords,
-            }
-            post = await asyncio.to_thread(_insert_post, payload)
+            # Step 3/6 — Meta title + description (NVIDIA NIM).
             print(
-                f"[AutoBlog] Step 6/6: Saved post id={post.get('id')} "
-                f"slug={post.get('slug')}"
+                "[AutoBlog Background] Step 3: Generating meta title and "
+                "description (NVIDIA NIM)...",
+                flush=True,
             )
-            return {"post": post, "topic": research.topic, "keywords": research.keywords}
-        except Exception as exc:  # noqa: BLE001
+            try:
+                meta_title, meta_description = await _meta_chunk(research)
+                print(
+                    f"[AutoBlog Background] Step 3/6: Meta data complete. "
+                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[AutoBlog Background] Step 3/6: Meta failed "
+                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    flush=True,
+                )
+                return None
+            await asyncio.sleep(STEP_PAUSE_SECONDS)
+
+            # Step 4/6 — Article writing (Gemini).
             print(
-                f"[AutoBlog] Step 6/6: Upload failed "
-                f"({type(exc).__name__}: {exc}). Aborting run."
+                "[AutoBlog Background] Step 4: Writing article with Gemini...",
+                flush=True,
             )
-            return None
-    finally:
-        _RUN_LOCK.release()
+            try:
+                article = await _write_article(research)
+                print(
+                    f"[AutoBlog Background] Step 4/6: Article written. "
+                    f"Waiting {STEP_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[AutoBlog Background] Step 4/6: Writing failed "
+                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    flush=True,
+                )
+                return None
+            await asyncio.sleep(STEP_PAUSE_SECONDS)
+
+            # Step 5/6 — Images (Pollinations, one by one).
+            print(
+                "[AutoBlog Background] Step 5: Generating images "
+                "(Pollinations)...",
+                flush=True,
+            )
+            try:
+                content_html, content_images = await _images_chunk(
+                    article["content_html"], research.keywords
+                )
+                cover = _cover_image_url(meta_title, research.keywords)
+                print(
+                    f"[AutoBlog Background] Step 5/6: Images complete "
+                    f"({len(content_images)} in-article + cover).",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[AutoBlog Background] Step 5/6: Images failed "
+                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    flush=True,
+                )
+                return None
+
+            # Step 6/6 — Upload (Supabase).
+            print(
+                "[AutoBlog Background] Step 6: Saving post to Supabase...",
+                flush=True,
+            )
+            try:
+                payload = {
+                    "slug_base": slugify(meta_title),
+                    "title": meta_title,
+                    "content": content_html,
+                    "excerpt": meta_description,
+                    "cover_image_url": cover,
+                    "content_images": content_images,
+                    "tags": article["tags"],
+                    "keywords": research.keywords,
+                }
+                post = await asyncio.to_thread(_insert_post, payload)
+                print(
+                    f"[AutoBlog Background] Step 6/6: Saved post "
+                    f"id={post.get('id')} slug={post.get('slug')}",
+                    flush=True,
+                )
+                print("[AutoBlog Background]  TASK COMPLETED SUCCESSFULLY!", flush=True)
+                return {
+                    "post": post,
+                    "topic": research.topic,
+                    "keywords": research.keywords,
+                }
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[AutoBlog Background] Step 6/6: Upload failed "
+                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    flush=True,
+                )
+                return None
+        finally:
+            _RUN_LOCK.release()
+    except Exception as e:
+        # Global catch — a background task raises INTO the void, so this is
+        # the only place the exact failure can surface in the nohup log.
+        print(f"[AutoBlog Background] 💥 CRITICAL TASK ERROR: {e}", flush=True)
+        import traceback
+
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        return None
 
 
 async def run_pipeline() -> dict[str, Any] | None:
