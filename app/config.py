@@ -18,6 +18,10 @@ class Settings:
     max_retries: int
     supabase_url: str
     supabase_anon_key: str
+    supabase_service_role_key: str
+    google_api_key: str
+    blog_model: str
+    tavily_api_key: str
 
     @property
     def ai_ready(self) -> bool:
@@ -26,6 +30,11 @@ class Settings:
     @property
     def supabase_ready(self) -> bool:
         return bool(self.supabase_url) and bool(self.supabase_anon_key)
+
+    @property
+    def blog_ready(self) -> bool:
+        """Auto Blog needs Gemini to write and the service-role key to save."""
+        return bool(self.google_api_key) and bool(self.supabase_service_role_key)
 
 
 @lru_cache(maxsize=1)
@@ -47,4 +56,9 @@ def get_settings() -> Settings:
         max_retries=int(os.getenv("AI_MAX_RETRIES", "1")),
         supabase_url=os.getenv("SUPABASE_URL", "").strip().rstrip("/"),
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", "").strip(),
+        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+        google_api_key=os.getenv("GOOGLE_API_KEY", "").strip(),
+        blog_model=os.getenv("GOOGLE_BLOG_MODEL", "gemini-1.5-flash").strip()
+        or "gemini-1.5-flash",
+        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
     )
