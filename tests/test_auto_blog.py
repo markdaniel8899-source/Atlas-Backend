@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest import mock
 
 from app.services import auto_blog
 
@@ -105,6 +106,61 @@ class TestStaggeredPipeline(unittest.TestCase):
         finally:
             auto_blog._RUN_LOCK.release()
         self.assertFalse(auto_blog.is_run_active())
+
+
+class TestNimChat(unittest.TestCase):
+    def test_missing_key_raises_503(self):
+        with mock.patch.object(auto_blog, "NVIDIA_API_KEY", ""):
+            with self.assertRaises(auto_blog.BlogPipelineError) as ctx:
+                auto_blog._nim_chat("sys", "user", temperature=0.1, max_tokens=10)
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_success_returns_stripped_content(self):
+        fake = mock.Mock()
+        fake.raise_for_status = mock.Mock()
+        fake.json.return_value = {"choices": [{"message": {"content": "  hello "}}]}
+        with (
+            mock.patch.object(auto_blog, "NVIDIA_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.requests, "post", return_value=fake) as post,
+        ):
+            text = auto_blog._nim_chat("sys", "user", temperature=0.3, max_tokens=64)
+        self.assertEqual(text, "hello")
+        _, kwargs = post.call_args
+        self.assertTrue(
+            kwargs["url"].endswith("/chat/completions")
+            if "url" in kwargs
+            else post.call_args[0][0].endswith("/chat/completions")
+        )
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(kwargs["json"]["model"], auto_blog.NVIDIA_MODEL)
+        self.assertEqual(
+            kwargs["json"]["messages"],
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "user"},
+            ],
+        )
+
+    def test_http_error_becomes_pipeline_error(self):
+        fake = mock.Mock()
+        fake.raise_for_status.side_effect = RuntimeError("429 too many requests")
+        with (
+            mock.patch.object(auto_blog, "NVIDIA_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.requests, "post", return_value=fake),
+        ):
+            with self.assertRaises(auto_blog.BlogPipelineError):
+                auto_blog._nim_chat("s", "p", temperature=0.1, max_tokens=10)
+
+    def test_empty_text_raises_pipeline_error(self):
+        fake = mock.Mock()
+        fake.raise_for_status = mock.Mock()
+        fake.json.return_value = {"choices": [{"message": {"content": "   "}}]}
+        with (
+            mock.patch.object(auto_blog, "NVIDIA_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.requests, "post", return_value=fake),
+        ):
+            with self.assertRaises(auto_blog.BlogPipelineError):
+                auto_blog._nim_chat("s", "p", temperature=0.1, max_tokens=10)
 
 
 if __name__ == "__main__":

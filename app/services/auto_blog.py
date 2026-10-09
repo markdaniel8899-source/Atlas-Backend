@@ -1,21 +1,30 @@
-"""Auto AI Blog Writer — staggered 6-chunk pipeline (rate-limit friendly).
+"""Auto AI Blog Writer — staggered 6-chunk HYBRID pipeline (rate-limit friendly).
 
 Runs in the background via FastAPI BackgroundTasks (POST /api/blog/generate)
 and daily at 09:00 UTC through APScheduler (wired up in app.main).
 
+HYBRID MODEL ROUTING — Gemini's free-tier quota is tiny, so it is reserved
+for the one task it does best (long-form article writing). Everything else
+runs on NVIDIA NIM (free, OpenAI-compatible):
+
+  - NVIDIA NIM : topic extraction, keywords, meta title/description
+  - Gemini     : final ~1000-word article only (1 call per run)
+  - Tavily     : web research (not an LLM)
+  - Pollinations.ai : cover + in-article images (keyless)
+
 The pipeline is deliberately split into chunks with pauses between them so
-Tavily and Gemini never see a burst of back-to-back calls (avoids 429s):
+no provider sees a burst of back-to-back calls (avoids 429s):
 
   1. Research      — Tavily Search in the "AI & Technology" niche.   [5s]
-  2. Keywords      — Gemini distills one trending topic + the top 3-5
-                     SEO keywords from the results. Tavily failure falls
-                     back to a curated niche topic (never crashes).   [5s]
-  3. Meta          — Gemini writes the catchy meta title + meta
-                     description (with plain fallbacks).              [5s]
+  2. Keywords      — NVIDIA NIM distills one trending topic + the top
+                     3-5 SEO keywords from the results. Tavily failure
+                     falls back to a curated niche topic.            [5s]
+  3. Meta          — NVIDIA NIM writes the catchy meta title + meta
+                     description (with plain fallbacks).             [5s]
   4. Write         — Gemini writes a ~1000-word, SEO-optimised article
                      as strict JSON (title / excerpt / content_html /
                      tags). Basic human language; robotic AI phrasing
-                     and keyword stuffing are banned.                 [5s]
+                     and keyword stuffing are banned.                [5s]
   5. Images        — Pollinations.ai cover + up to three in-article
                      images (800x450) generated ONE BY ONE with a 3s
                      pause between each; the URLs are embedded as
@@ -23,9 +32,10 @@ Tavily and Gemini never see a burst of back-to-back calls (avoids 429s):
   6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
-Error handling: every chunk is wrapped in try/except — any Tavily, Gemini,
-or database failure is logged as [AutoBlog] and the run exits gracefully
-(returns None) without ever crashing the server.
+Error handling: every chunk is wrapped in try/except — any Tavily, NIM,
+Gemini, or database failure is logged as [AutoBlog] and the run exits
+gracefully (returns None) without ever crashing the server. NIM failures
+in steps 2-3 fall back to plain heuristics (no Gemini quota burned).
 
 Async note: clients are created per run on purpose — the background task
 and the scheduler job each own their event loop; no client object may be
@@ -36,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 import re
 import threading
 import uuid
@@ -47,11 +58,22 @@ from functools import lru_cache
 from typing import Any
 
 import google.generativeai as genai
+import requests
 from supabase import Client, create_client
 from tavily import TavilyClient
 
 from app import ai_service
 from app.config import get_settings
+
+# ── NVIDIA NIM (hybrid pipeline: all chunks EXCEPT article writing) ──────────
+# OpenAI-compatible endpoint at integrate.api.nvidia.com. Free-tier friendly.
+# Note: read AFTER `from app.config import get_settings` so load_dotenv() has
+# already populated os.environ from backend/.env.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_API_URL = os.getenv(
+    "NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1"
+).strip()
+NVIDIA_MODEL = os.getenv("NVIDIA_BLOG_MODEL", "meta/llama-3.3-70b-instruct").strip()
 
 MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 
@@ -187,7 +209,50 @@ def _pad_keywords(keywords: list[str], topic: str) -> list[str]:
     return out or [topic.lower()]
 
 
-# ───────────────────────────── Gemini helpers ────────────────────────────────
+# ─────────────────────── NVIDIA NIM helpers (light chunks) ───────────────────
+
+
+def _nim_chat(
+    system: str, prompt: str, *, temperature: float, max_tokens: int
+) -> str:
+    """Sync NVIDIA NIM chat call (OpenAI-compatible) — run via asyncio.to_thread.
+
+    Used for the outline (topic + keywords) and meta chunks so Gemini's small
+    free-tier quota is saved for article writing only.
+    """
+    if not NVIDIA_API_KEY:
+        raise BlogPipelineError("NVIDIA_API_KEY is not configured.", status_code=503)
+    try:
+        response = requests.post(
+            f"{NVIDIA_API_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": NVIDIA_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=90,
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = str(data["choices"][0]["message"]["content"] or "").strip()
+    except BlogPipelineError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced as a pipeline error
+        raise BlogPipelineError(f"NVIDIA NIM call failed: {exc}") from exc
+    if not text:
+        raise BlogPipelineError("NVIDIA NIM returned empty text.")
+    return text
+
+
+# ───────────────────────── Gemini helpers (article writing) ──────────────────
 
 
 def _gemini_model(system_instruction: str) -> genai.GenerativeModel:
@@ -253,21 +318,21 @@ def _clean_result(item: dict[str, Any]) -> dict[str, str]:
 
 
 async def _outline(results: list[dict[str, str]]) -> dict[str, Any]:
-    """Gemini picks the day's topic + top 3-5 keywords from the Tavily results."""
+    """NVIDIA NIM picks the day's topic + top 3-5 keywords from the results."""
     blob = "\n".join(
         f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
     )
     try:
-        model = _gemini_model(_OUTLINE_SYSTEM)
-        text = await _generate(
-            model,
+        text = await asyncio.to_thread(
+            _nim_chat,
+            _OUTLINE_SYSTEM,
             f"Today's research:\n{blob}",
             temperature=0.3,
             max_tokens=1024,
         )
         return ai_service.extract_json(text, prefer="keywords")
     except Exception as exc:  # noqa: BLE001 - any failure falls back to heuristics
-        print(f"[AutoBlog] outline extraction failed: {type(exc).__name__}: {exc}")
+        print(f"[AutoBlog] outline extraction failed (NIM): {type(exc).__name__}: {exc}")
         return {}
 
 
@@ -281,10 +346,10 @@ async def _research_chunk() -> list[dict[str, str]]:
 
 
 async def _keywords_chunk(results: list[dict[str, str]]) -> Research:
-    """Step 2/6: Gemini picks the topic + top 3-5 keywords from the results.
+    """Step 2/6: NVIDIA NIM picks the topic + top 3-5 keywords from results.
 
     Falls back to a curated daily topic when Tavily returned nothing, and to
-    the first headline when Gemini extraction fails.
+    the first headline when NIM extraction fails.
     """
     if not results:
         topic = FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
@@ -294,7 +359,7 @@ async def _keywords_chunk(results: list[dict[str, str]]) -> Research:
     outline = await _outline(results)
     topic = str(outline.get("topic") or "").strip()
     if not topic:
-        # Gemini failed → first result's headline is a decent specific topic.
+        # NIM failed → first result's headline is a decent specific topic.
         topic = results[0]["title"].split("|")[0].split(" - ")[0].strip()[:120]
     raw_keywords = outline.get("keywords")
     keywords = _pad_keywords(
@@ -310,12 +375,15 @@ async def _keywords_chunk(results: list[dict[str, str]]) -> Research:
 
 
 async def _meta_chunk(research: Research) -> tuple[str, str]:
-    """Step 3/6: catchy meta title + meta description (plain fallbacks)."""
+    """Step 3/6: catchy meta title + meta description via NVIDIA NIM.
+
+    Plain (non-LLM) fallbacks keep the run alive when NIM is down.
+    """
     sources = "\n".join(f"- {s}" for s in research.snippets[:3]) or "(none)"
     try:
-        model = _gemini_model(_META_SYSTEM)
-        text = await _generate(
-            model,
+        text = await asyncio.to_thread(
+            _nim_chat,
+            _META_SYSTEM,
             f"Topic: {research.topic}\n"
             f"Keywords: {', '.join(research.keywords)}\n"
             f"Research snippets:\n{sources}",
@@ -330,7 +398,7 @@ async def _meta_chunk(research: Research) -> tuple[str, str]:
                 return title[:300], description[:300]
         print("[AutoBlog] meta chunk returned incomplete JSON — using fallbacks.")
     except Exception as exc:  # noqa: BLE001 - fallback keeps the run alive
-        print(f"[AutoBlog] meta generation failed: {type(exc).__name__}: {exc}")
+        print(f"[AutoBlog] meta generation failed (NIM): {type(exc).__name__}: {exc}")
     fallback_desc = (
         research.snippets[0][:170].rstrip() + "…"
         if research.snippets
@@ -608,7 +676,7 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
             )
         await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-        # Step 2/6 — Keyword extraction (Gemini).
+        # Step 2/6 — Keyword extraction (NVIDIA NIM).
         try:
             research = await _keywords_chunk(results)
             print(
@@ -623,7 +691,7 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
             return None
         await asyncio.sleep(STEP_PAUSE_SECONDS)
 
-        # Step 3/6 — Meta title + description (Gemini).
+        # Step 3/6 — Meta title + description (NVIDIA NIM).
         try:
             meta_title, meta_description = await _meta_chunk(research)
             print(f"[AutoBlog] Step 3/6: Meta data complete. Waiting {STEP_PAUSE_SECONDS}s...")

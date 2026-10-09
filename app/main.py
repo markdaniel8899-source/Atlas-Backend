@@ -107,15 +107,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/blog/generate", tags=["blog"], status_code=202)
     async def generate_blog_post(background_tasks: BackgroundTasks) -> dict[str, object]:
-        """Kick off the staggered Auto Blog pipeline in the background:
-        Tavily research → Gemini keywords/meta/article → Pollinations
-        images (one by one, with pauses) → Supabase save. The pauses keep
-        every provider under its rate limit, so the run takes a few minutes.
+        """Kick off the staggered HYBRID Auto Blog pipeline in the background:
+        Tavily research → NVIDIA NIM keywords/meta → Gemini article (its one
+        call per run) → Pollinations images (one by one, with pauses) →
+        Supabase save. The pauses keep every provider under its rate limit,
+        so the run takes a few minutes.
         """
         if not settings.blog_ready:
             raise auto_blog.BlogPipelineError(
                 "Auto Blog is not configured: set GOOGLE_API_KEY and "
-                "SUPABASE_SERVICE_ROLE_KEY on the server.",
+                "SUPABASE_SERVICE_ROLE_KEY on the server (and NVIDIA_API_KEY "
+                "for the lightweight topic/meta chunks).",
                 status_code=503,
             )
         if auto_blog.is_run_active():
