@@ -15,6 +15,10 @@ Stages:
   3. Cover image   — Pollinations.ai: free, keyless, no hotlinking limits.
                      The URL itself carries the prompt, so nothing is
                      downloaded or uploaded — the blog <img> renders it.
+  3b. Content images — up to three more Pollinations images (800x450), one
+                     appended to the end of the first three <h2> sections as
+                     a <figure><img><figcaption>; the URLs are also stored in
+                     blog_posts.content_images (jsonb).
   4. Save          — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
@@ -30,6 +34,7 @@ thread loop; no client object may be shared across loops.
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 import threading
 import uuid
@@ -48,6 +53,9 @@ from app import ai_service
 from app.config import get_settings
 
 MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
+
+# How many in-article images to embed (one per H2 section, first N sections).
+MAX_CONTENT_IMAGES = 3
 
 # Single niche for the daily research query.
 NICHE = "AI & Technology"
@@ -359,6 +367,67 @@ def _cover_image_url(title: str, keywords: list[str]) -> str:
     )
 
 
+_H2_RE = re.compile(r"(<h2[^>]*>.*?</h2>)", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _content_image_url(section_title: str, keyword: str) -> str:
+    """Pollinations URL for an in-article image (800x450, same lazy pattern)."""
+    prompt = f"{section_title[:120]}, {keyword}, cinematic, high quality"
+    encoded = urllib.parse.quote(prompt, safe="")
+    return (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        "?width=800&height=450&nologo=true"
+    )
+
+
+def _figure_html(url: str, caption: str) -> str:
+    alt = html.escape(caption, quote=True)
+    text = html.escape(caption)
+    return (
+        f'<figure><img src="{url}" alt="{alt}" loading="lazy" '
+        f'width="800" height="450" />'
+        f"<figcaption>{text}</figcaption></figure>"
+    )
+
+
+def _embed_content_images(
+    content_html: str, keywords: list[str]
+) -> tuple[str, list[dict[str, str]]]:
+    """Append one <figure> image to the end of the first few <h2> sections.
+
+    Returns the updated HTML plus the metadata stored in
+    blog_posts.content_images. Articles with no <h2> at all get a single
+    image right after the first paragraph instead.
+    """
+    parts = _H2_RE.split(content_html)
+    if len(parts) < 3:
+        caption = _TAG_RE.sub(" ", parts[0])[:120].strip() or "Article illustration"
+        keyword = keywords[0] if keywords else "technology"
+        url = _content_image_url(caption, keyword)
+        figure = _figure_html(url, caption)
+        if "</p>" in content_html:
+            head, tail = content_html.split("</p>", 1)
+            html_out = f"{head}</p>{figure}{tail}"
+        else:
+            html_out = f"{content_html}{figure}"
+        return html_out, [{"url": url, "caption": caption}]
+
+    images: list[dict[str, str]] = []
+    out: list[str] = [parts[0]]
+    for section, i in enumerate(range(1, len(parts), 2)):
+        h2 = parts[i]
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        if section < MAX_CONTENT_IMAGES and keywords:
+            caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
+            url = _content_image_url(caption, keywords[section % len(keywords)])
+            body = f"{body}{_figure_html(url, caption)}"
+            images.append({"url": url, "caption": caption})
+        out.append(h2)
+        out.append(body)
+    return "".join(out), images
+
+
 # ────────────────────────────── Stage 4 · Save ────────────────────────────────
 
 
@@ -428,15 +497,20 @@ async def run_pipeline() -> dict[str, Any] | None:
             print(f"[AutoBlog] topic={research.topic!r} keywords={research.keywords}")
 
             article = await _write_article(research)
+            content_html, content_images = _embed_content_images(
+                article["content_html"], research.keywords
+            )
+            print(f"[AutoBlog] embedded {len(content_images)} content image(s)")
             cover = _cover_image_url(article["title"], research.keywords)
             print(f"[AutoBlog] cover image: {cover[:110]}")
 
             payload = {
                 "slug_base": slugify(article["title"]),
                 "title": article["title"],
-                "content": article["content_html"],
+                "content": content_html,
                 "excerpt": article["excerpt"],
                 "cover_image_url": cover,
+                "content_images": content_images,
                 "tags": article["tags"],
                 "keywords": research.keywords,
             }
