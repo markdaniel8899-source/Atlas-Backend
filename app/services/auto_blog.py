@@ -644,57 +644,131 @@ async def _write_article(research: Research) -> dict[str, Any]:
 
 # ─────────────── Stage 3 · Cover + in-article images (Pixabay first) ─────────
 
+# Final fallback when Pixabay has nothing for ANY query in the ladder —
+# the well-known Unsplash "AI / abstract tech" photo.
+PIXABAY_UNSWORTHY_HITS = frozenset(
+    {
+        "cake", "food", "eat", "eating", "eaten", "dinner", "lunch", "breakfast",
+        "restaurant", "meal", "cookie", "candy", "sugar", "bakery", "dessert",
+    }
+)
+# When the search query contains any of these, food-tagged Pixabay hits are
+# decoys (e.g. "AI Is Eating Software" must not return a cake photo).
+_TECH_CONTEXT_WORDS = frozenset(
+    {
+        "ai", "artificial", "intelligence", "software", "technology",
+        "technologies", "computer", "digital", "data", "robot", "algorithm",
+        "code", "coding", "developer", "programming", "tech", "machine",
+        "learning", "cloud", "cyber", "startup", "internet", "device",
+        "hardware", "assistant", "agents",
+    }
+)
+UNSPLASH_FALLBACK_IMAGE = (
+    "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1200"
+)
 
-async def fetch_relevant_image(keywords: str) -> str | None:
-    """Fetch a relevant photo from Pixabay using article keywords.
 
-    Pixabay auto-serves WebP to supporting browsers, so only the image URL
-    is stored (no image data travels through the DB). Returns None on any
-    failure (no key, no hits, network error) — the caller falls back to a
-    Pollinations URL so the pipeline never dies on images.
+def _pick_hit(hits: list[dict], query: str) -> str:
+    """Pick the best hit: skip food-matched decoys on tech-context queries.
+
+    Literal title words (e.g. "AI Is Eating Software") otherwise surface
+    cake/food photos — the exact failure users reported. A genuinely foody
+    query (no tech words) still gets food photos normally.
+    """
+    query_tokens = set(re.findall(r"[a-z]+", query.lower()))
+    query_is_techy = bool(query_tokens & _TECH_CONTEXT_WORDS)
+    for hit in hits:
+        tags = str(hit.get("tags") or "").lower()
+        if query_is_techy and any(w in tags for w in PIXABAY_UNSWORTHY_HITS):
+            continue
+        url = str(hit.get("largeImageURL") or "").strip()
+        if url:
+            return url
+    # Every hit was filtered out — take the first usable URL anyway.
+    for hit in hits:
+        url = str(hit.get("largeImageURL") or "").strip()
+        if url:
+            return url
+    return ""
+
+
+async def fetch_relevant_image(
+    title: str, keywords: list[str] | None = None, category: str | None = None
+) -> str | None:
+    """Fetch a relevant photo from Pixabay using title-first search terms.
+
+    Query ladder (first query with hits wins):
+      1. first 3-4 words of the title + " technology"  (most specific)
+      2. first 2 article keywords
+      3. "<category> professional"
+      4. the bare title topic
+
+    NOTE: `category` is only used as SEARCH TEXT. Pixabay's API `category`
+    param accepts a single value like "computer"/"business" (no "technology";
+    invalid values → HTTP 400), so it is never sent as an API param.
+
+    Returns the largeImageURL of the most relevant hit (Pixabay auto-serves
+    WebP, so only the URL is stored), the Unsplash fallback when the whole
+    ladder finds nothing, or None when there is no API key (the caller then
+    falls back to a Pollinations URL).
     """
     if not PIXABAY_API_KEY:
         return None
-    query = (keywords or "").strip()
-    if not query:
-        return None
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://pixabay.com/api/",
-                params={
-                    "key": PIXABAY_API_KEY,
-                    "q": query,
-                    "image_type": "photo",
-                    "orientation": "horizontal",
-                    "safesearch": "true",
-                    "min_width": 1280,
-                    # Pixabay's valid per_page range is 3-200; we only use hits[0].
-                    "per_page": 3,
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-        hits = data.get("hits") if isinstance(data, dict) else None
-        if hits:
-            # largeImageURL — Pixabay auto-serves WebP to supporting browsers.
-            url = str(hits[0].get("largeImageURL") or "").strip()
-            if url:
-                print(f"[AutoBlog] Pixabay image OK for {query!r}", flush=True)
-                return url
-        print(f"[AutoBlog] Pixabay no hits for {query!r} — using fallback.", flush=True)
-    except Exception as exc:  # noqa: BLE001 - fallback keeps the run alive
-        print(
-            f"[AutoBlog] Pixabay fetch failed ({type(exc).__name__}: {exc}) "
-            "— using fallback.",
-            flush=True,
-        )
-    return None
+
+    main_topic = " ".join((title or "").split()[:4]).strip()
+    kw = [k for k in (keywords or []) if k]
+    queries = [
+        f"{main_topic} technology" if main_topic else None,
+        " ".join(kw[:2]) if kw else None,
+        f"{category} professional" if category else None,
+        main_topic or None,
+    ]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for query in queries:
+            if not query:
+                continue
+            try:
+                response = await client.get(
+                    "https://pixabay.com/api/",
+                    params={
+                        "key": PIXABAY_API_KEY,
+                        "q": query[:100],
+                        "image_type": "photo",
+                        "orientation": "horizontal",
+                        "safesearch": "true",
+                        "min_width": 1200,
+                        "min_height": 800,
+                        "order": "popular",
+                        # Valid range is 3-200; we pick the best of the 5.
+                        "per_page": 5,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:  # noqa: BLE001 - try the next query
+                print(
+                    f"[AutoBlog] Pixabay query {query!r} failed "
+                    f"({type(exc).__name__}: {exc}) — trying next.",
+                    flush=True,
+                )
+                continue
+            hits = data.get("hits") if isinstance(data, dict) else None
+            if hits:
+                url = _pick_hit(hits, query)
+                if url:
+                    print(f"[AutoBlog] Pixabay image OK for {query!r}", flush=True)
+                    return url
+
+    print(
+        f"[AutoBlog] Pixabay found nothing for {title!r} — using Unsplash fallback.",
+        flush=True,
+    )
+    return UNSPLASH_FALLBACK_IMAGE
 
 
 def _pollinations_cover_url(title: str, keywords: list[str]) -> str:
-    """Pollinations.ai FALLBACK cover (keyless) when Pixabay has no hit.
+    """Pollinations.ai FALLBACK cover (keyless) when Pixabay is unavailable.
 
     The prompt lives inside the URL, so the image is generated lazily the
     first time the blog <img> is requested. Nothing is downloaded/uploaded.
@@ -713,7 +787,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _pollinations_content_url(section_title: str, keyword: str) -> str:
-    """Pollinations.ai FALLBACK in-article image when Pixabay has no hit."""
+    """Pollinations.ai FALLBACK in-article image when Pixabay is unavailable."""
     prompt = f"{section_title[:120]}, {keyword}, cinematic, high quality"
     encoded = urllib.parse.quote(prompt, safe="")
     return (
@@ -723,25 +797,26 @@ def _pollinations_content_url(section_title: str, keyword: str) -> str:
 
 
 async def _cover_image_url(title: str, keywords: list[str]) -> str:
-    """Pixabay first (up to 3 keywords in the query); Pollinations fallback."""
-    query = " ".join(keywords[:3]) if keywords else title.split(":")[0]
-    url = await fetch_relevant_image(query)
+    """Pixabay (title-first ladder); Pollinations URL only if the key is missing."""
+    url = await fetch_relevant_image(title, keywords, category="technology")
     return url or _pollinations_cover_url(title, keywords)
 
 
 async def _content_image_url(section_title: str, keyword: str) -> str:
-    """Pixabay first for the section keyword; Pollinations fallback."""
-    url = await fetch_relevant_image(keyword) if keyword else None
+    """Pixabay (section title + article keyword); Pollinations if key missing."""
+    url = await fetch_relevant_image(
+        section_title, [keyword] if keyword else None, category="technology"
+    )
     return url or _pollinations_content_url(section_title, keyword)
 
 
 def _figure_html(url: str, caption: str) -> str:
+    """<figure> with the image only — caption text stays in the DB metadata,
+    it is NOT rendered under the image (alt text keeps it for SEO/a11y)."""
     alt = html.escape(caption, quote=True)
-    text = html.escape(caption)
     return (
         f'<figure><img src="{url}" alt="{alt}" loading="lazy" '
-        f'width="800" height="450" />'
-        f"<figcaption>{text}</figcaption></figure>"
+        'width="800" height="450" /></figure>'
     )
 
 

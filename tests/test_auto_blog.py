@@ -36,52 +36,129 @@ def _fake_pixabay_client(hits):
     return client, cm
 
 
+def _resp(hits):
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {"hits": hits}
+    return response
+
+
+def _client_with_responses(responses):
+    client = mock.MagicMock()
+    client.get = mock.AsyncMock(side_effect=responses)
+    cm = mock.MagicMock()
+    cm.__aenter__ = mock.AsyncMock(return_value=client)
+    cm.__aexit__ = mock.AsyncMock(return_value=False)
+    return client, cm
+
+
 class TestFetchRelevantImage(unittest.TestCase):
     def test_missing_key_returns_none(self):
         with mock.patch.object(auto_blog, "PIXABAY_API_KEY", ""):
-            result = asyncio.run(auto_blog.fetch_relevant_image("ai education"))
+            result = asyncio.run(
+                auto_blog.fetch_relevant_image("ai education", ["deep learning"])
+            )
         self.assertIsNone(result)
 
-    def test_empty_query_returns_none(self):
-        with mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"):
-            result = asyncio.run(auto_blog.fetch_relevant_image("   "))
-        self.assertIsNone(result)
-
-    def test_returns_large_image_url(self):
+    def test_title_topic_is_first_query(self):
         client, cm = _fake_pixabay_client(
-            [{"largeImageURL": "https://cdn.pixabay.com/photo/1-large.jpg"}]
+            [
+                {
+                    "tags": "ai, software",
+                    "largeImageURL": "https://cdn.pixabay.com/photo/1-large.jpg",
+                }
+            ]
         )
         with (
             mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
             mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
         ):
-            url = asyncio.run(auto_blog.fetch_relevant_image("ai education"))
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image(
+                    "AI Is Eating Software", ["ai tools"], category="technology"
+                )
+            )
         self.assertEqual(url, "https://cdn.pixabay.com/photo/1-large.jpg")
         params = client.get.call_args.kwargs["params"]
-        self.assertEqual(params["q"], "ai education")
+        self.assertEqual(params["q"], "AI Is Eating Software technology")
         self.assertEqual(params["image_type"], "photo")
         self.assertEqual(params["orientation"], "horizontal")
-        # Pixabay's valid per_page range is 3-200; we only use hits[0].
-        self.assertEqual(params["per_page"], 3)
+        self.assertEqual(params["per_page"], 5)
+        self.assertEqual(params["min_width"], 1200)
+        self.assertEqual(params["order"], "popular")
+        # category is search text only — never an API param (invalid values 400).
+        self.assertNotIn("category", params)
 
-    def test_http_error_returns_none(self):
+    def test_second_query_used_when_first_empty(self):
+        client, cm = _client_with_responses(
+            [_resp([]), _resp([{"tags": "ai", "largeImageURL": "https://cdn.pixabay.com/2.jpg"}])]
+        )
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image("AI Is Eating Software", ["ai tools"])
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/2.jpg")
+        self.assertEqual(client.get.call_count, 2)
+        # Second query = first two keywords.
+        self.assertEqual(client.get.call_args_list[1].kwargs["params"]["q"], "ai tools")
+
+    def test_food_decoy_hits_are_skipped(self):
+        cake = {
+            "tags": "cake, food, eating",
+            "largeImageURL": "https://cdn.pixabay.com/cake.jpg",
+        }
+        tech = {
+            "tags": "ai, software",
+            "largeImageURL": "https://cdn.pixabay.com/tech.jpg",
+        }
+        _, cm = _fake_pixabay_client([cake, tech])
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image("AI Is Eating Software", ["ai"])
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/tech.jpg")
+
+    def test_genuinely_foody_query_keeps_food_hits(self):
+        cake = {
+            "tags": "cake, food, birthday",
+            "largeImageURL": "https://cdn.pixabay.com/cake.jpg",
+        }
+        _, cm = _fake_pixabay_client([cake])
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image("Birthday Cake Decorating Tips", ["baking"])
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/cake.jpg")
+
+    def test_http_errors_on_all_queries_return_unsplash_fallback(self):
         client, cm = _fake_pixabay_client([])
         client.get.side_effect = RuntimeError("boom")
         with (
             mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
             mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
         ):
-            url = asyncio.run(auto_blog.fetch_relevant_image("ai"))
-        self.assertIsNone(url)
+            url = asyncio.run(auto_blog.fetch_relevant_image("ai", ["ai"]))
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
-    def test_no_hits_returns_none(self):
+    def test_ladder_exhausted_returns_unsplash_fallback(self):
         _, cm = _fake_pixabay_client([])
         with (
             mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
             mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
         ):
-            url = asyncio.run(auto_blog.fetch_relevant_image("ai"))
-        self.assertIsNone(url)
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image("Totally Unknown Thing", ["zzz"])
+            )
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
 
 class TestCoverImageUrl(unittest.TestCase):
@@ -156,7 +233,8 @@ class TestImagesChunk(unittest.TestCase):
         out, images = _run_images_chunk(html_in, ["ai", "learning"])
         self.assertEqual(len(images), auto_blog.MAX_CONTENT_IMAGES)
         self.assertEqual(out.count("<figure>"), auto_blog.MAX_CONTENT_IMAGES)
-        self.assertEqual(out.count("<figcaption>"), auto_blog.MAX_CONTENT_IMAGES)
+        # Captions are NOT rendered under images — only the <img> itself.
+        self.assertNotIn("<figcaption>", out)
         # Fourth section stays image-free.
         self.assertIn("<h2>Section Four</h2><p>Body four.</p>", out)
         # Figure sits at the END of its section (before the next <h2>).
@@ -196,10 +274,11 @@ class TestImagesChunk(unittest.TestCase):
         html_in = '<h2>Tom & Jerry\'s "Study" <Guide></h2><p>x</p>'
         out, images = _run_images_chunk(html_in, ["ai"])
         self.assertEqual(len(images), 1)
-        # "<Guide>" is tag-stripped from the caption, then entities are escaped.
-        self.assertIn("<figcaption>Tom &amp; Jerry&#x27;s &quot;Study&quot;</figcaption>", out)
+        # Caption text lives in metadata + alt only; nothing under the image.
+        self.assertNotIn("<figcaption>", out)
         self.assertIn('alt="Tom &amp; Jerry&#x27;s &quot;Study&quot;"', out)
         self.assertNotIn('alt="Tom & Jerry', out)
+        self.assertEqual(images[0]["caption"], 'Tom & Jerry\'s "Study"')
 
     def test_empty_keywords_skips_images(self):
         html_in = "<h2>Only</h2><p>x</p>"
