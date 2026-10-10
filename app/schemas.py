@@ -21,6 +21,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=24)
+    # Signed-in learner's profile name; drives how ATLAS addresses them.
+    user_name: str = Field(default="", max_length=120)
 
 
 class ChatResponse(BaseModel):

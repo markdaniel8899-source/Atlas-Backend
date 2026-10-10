@@ -1,10 +1,12 @@
-"""Gamification endpoints: achievement checks, avatar selection and squad
-request management.
+"""Gamification endpoints: achievement checks and avatar selection.
 
 These wrap SECURITY DEFINER Postgres RPCs (migration 0011) with the
 service-role client. The web app talks to Supabase directly and only uses
 these routes as a server-side surface (automation, mobile clients, etc.);
 both paths share the exact same database logic.
+
+The social graph is friends only (friendships table + invite_friend RPC);
+squad endpoints were removed with migration 0012.
 """
 
 from __future__ import annotations
@@ -73,19 +75,6 @@ class AvatarSelectRequest(BaseModel):
     avatar_url: str | None = Field(default=None, max_length=500)
 
 
-class SquadRespondRequest(BaseModel):
-    request_id: int = Field(ge=1)
-    accept: bool = False
-
-
-class SquadCreateRequest(BaseModel):
-    name: str = Field(min_length=2, max_length=40)
-
-
-class SquadJoinRequest(BaseModel):
-    squad_id: int = Field(ge=1)
-
-
 @router.post("/achievements/check")
 async def check_achievements(
     _body: EmptyRequest | None = None,
@@ -145,69 +134,3 @@ def _is_safe_avatar_url(url: str) -> bool:
         and parsed.hostname == "api.dicebear.com"
         and bool(_DICEBEAR_PATH.match(parsed.path))
     )
-
-
-@router.post("/squads/requests/respond")
-async def respond_squad_request(
-    body: SquadRespondRequest,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Accept or decline a squad join request / invite.
-
-    Only the squad leader (join requests) or the invited user (invites) may
-    respond; the database RPC enforces that rule.
-    """
-    user_id = _user_id_from(authorization)
-    data = _rpc(
-        _service_client(),
-        "respond_squad_request",
-        p_request_id=body.request_id,
-        p_accept=body.accept,
-        p_user_id=user_id,
-    )
-    payload = data if isinstance(data, dict) else {}
-    return {
-        "ok": bool(payload.get("ok", False)),
-        "message": payload.get("message", "Done."),
-    }
-
-
-@router.post("/squads", status_code=201)
-async def create_squad(
-    body: SquadCreateRequest,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    user_id = _user_id_from(authorization)
-    data = _rpc(
-        _service_client(),
-        "create_squad",
-        p_name=body.name.strip(),
-        p_user_id=user_id,
-    )
-    payload = data if isinstance(data, dict) else {}
-    return {
-        "ok": bool(payload.get("ok", False)),
-        "message": payload.get("message", "Done."),
-        "squad_id": payload.get("squad_id"),
-    }
-
-
-@router.post("/squads/join")
-async def request_squad_join(
-    body: SquadJoinRequest,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """File a join request - never auto-joins; the leader must approve."""
-    user_id = _user_id_from(authorization)
-    data = _rpc(
-        _service_client(),
-        "request_join_squad",
-        p_squad_id=body.squad_id,
-        p_user_id=user_id,
-    )
-    payload = data if isinstance(data, dict) else {}
-    return {
-        "ok": bool(payload.get("ok", False)),
-        "message": payload.get("message", "Done."),
-        "request_id": payload.get("request_id"),
-    }
