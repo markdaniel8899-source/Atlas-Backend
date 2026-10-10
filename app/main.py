@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app import ai_service
 from app.config import get_settings
-from app.routers import chat, quizzes, roadmaps
+from app.routers import chat, gamification, quizzes, roadmaps
 from app.services import auto_blog
 
 # Background-task logs go to stdout (the nohup log). A non-tty stdout is
@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(quizzes.router)
     app.include_router(roadmaps.router)
+    app.include_router(gamification.router)
 
     @app.exception_handler(ai_service.AIServiceError)
     async def handle_ai_error(
