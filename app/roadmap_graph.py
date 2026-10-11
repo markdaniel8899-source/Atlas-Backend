@@ -408,9 +408,20 @@ def _make_key(raw: str, phase_index: int, position: int, seen: set[str]) -> str:
         key = f"p{phase_index}-{position + 1}"
     candidate = key
     suffix = 1
+    attempts = 0
+    max_attempts = 100
     while candidate in seen:
+        attempts += 1
+        if attempts > max_attempts:
+            # Belt-and-braces: never spin forever inside an async endpoint.
+            # (With key[:60] below, each suffix yields a distinct candidate,
+            # so this breaker is effectively unreachable in practice.)
+            break
         suffix += 1
-        candidate = f"{key}-{suffix}"[:70]
+        # key[:60] guarantees room for the suffix, so the candidate can
+        # never be truncated back into `key` and collide with itself -
+        # the old `f"{key}-{suffix}"[:70]` looped forever on long keys.
+        candidate = f"{key[:60]}-{suffix}"
     return candidate
 
 

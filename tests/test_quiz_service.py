@@ -45,6 +45,7 @@ from app.quiz_service import (
 )
 from app.routers import quizzes as quizzes_router
 from app.schemas import QuizGenerateRequest
+from app.deps import get_current_user
 
 
 def run(coro):
@@ -620,6 +621,8 @@ class GenerateQuizTests(unittest.TestCase):
 def make_client() -> TestClient:
     app = FastAPI()
     app.include_router(quizzes_router.router)
+    # Routes require a valid Supabase JWT now; skip auth in unit tests.
+    app.dependency_overrides[get_current_user] = lambda: "test-user-id"
     return TestClient(app)
 
 

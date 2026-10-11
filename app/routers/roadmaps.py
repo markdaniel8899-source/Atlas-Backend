@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app import ai_service, prompts, roadmap_graph
+from app.deps import get_current_user
 from app.schemas import (
     RoadmapOutlinePhase,
     RoadmapOutlineResponse,
@@ -74,7 +75,9 @@ def _extract_levels(data: object) -> list[dict]:
 
 
 @router.post("/outline", response_model=RoadmapOutlineResponse)
-async def generate_outline(req: RoadmapRequest) -> RoadmapOutlineResponse:
+async def generate_outline(
+    req: RoadmapRequest, user_id: str = Depends(get_current_user)
+) -> RoadmapOutlineResponse:
     """Step 1: phase titles only - returned to the UI immediately.
 
     Small request/ response, so it never times out or hits TPM limits; the
@@ -112,7 +115,9 @@ async def generate_outline(req: RoadmapRequest) -> RoadmapOutlineResponse:
 
 
 @router.post("/phase", response_model=RoadmapPhaseResponse)
-async def generate_phase(req: RoadmapPhaseRequest) -> RoadmapPhaseResponse:
+async def generate_phase(
+    req: RoadmapPhaseRequest, user_id: str = Depends(get_current_user)
+) -> RoadmapPhaseResponse:
     """Step 2+: detailed levels for ONE phase - one small, fast chunk."""
     target = next((p for p in req.outline if p.number == req.phase_number), None)
     if target is None:

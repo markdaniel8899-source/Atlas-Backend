@@ -3,11 +3,20 @@ from __future__ import annotations
 import io
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from pypdf import PdfReader
 from pydantic import ValidationError
 
 from app import ai_service, prompts
+from app.deps import get_current_user
 from app.quiz_service import build_plan, generate_quiz
 from app.schemas import (
     EvaluateRequest,
@@ -51,14 +60,18 @@ async def _call_llm_small(system: str, user: str) -> str:
 
 @router.post("/generate", response_model=QuizGenerateResponse)
 async def generate_quiz_endpoint(
-    req: QuizGenerateRequest, request: Request
+    req: QuizGenerateRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user),
 ) -> QuizGenerateResponse:
+    # user_id is validated by the dependency: anonymous callers get a 401.
     return await _generate(req, auth_header=request.headers.get("authorization"))
 
 
 @router.post("/generate-pdf", response_model=QuizGenerateResponse)
 async def generate_quiz_from_pdf(
     request: Request,
+    user_id: str = Depends(get_current_user),
     file: UploadFile = File(...),
     topic: str = Form(""),
     kind: str = Form(...),
@@ -181,7 +194,10 @@ async def _generate(
 
 
 @router.post("/evaluate", response_model=EvaluateResponse)
-async def evaluate(req: EvaluateRequest) -> EvaluateResponse:
+async def evaluate(
+    req: EvaluateRequest, user_id: str = Depends(get_current_user)
+) -> EvaluateResponse:
+    # user_id is validated by the dependency: anonymous callers get a 401.
     if req.kind is QuizKind.MCQ:
         return _evaluate_mcq(req)
 
