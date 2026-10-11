@@ -24,6 +24,7 @@ class Settings:
     google_api_key: str
     blog_model: str
     tavily_api_key: str
+    admin_secret: str
 
     @property
     def ai_ready(self) -> bool:
@@ -74,4 +75,7 @@ def get_settings() -> Settings:
         blog_model=os.getenv("GOOGLE_BLOG_MODEL", "gemini-3.8-flash").strip()
         or "gemini-3.8-flash",
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+        # Shared secret for privileged endpoints (e.g. X-Admin-Secret on
+        # /api/blog/generate). Empty = secret path disabled (admin JWT only).
+        admin_secret=os.getenv("ADMIN_SECRET", "").strip(),
     )

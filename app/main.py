@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import secrets
 import sys
 import traceback
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import ai_service
 from app.config import get_settings
+from app.deps import fetch_profile_role, verify_bearer_token
 from app.routers import chat, gamification, quizzes, roadmaps
 from app.services import auto_blog
 
@@ -32,6 +35,36 @@ REQUIRED_ORIGINS = [
     "http://127.0.0.1:5173",
     "https://atlas-frontend-pearl.vercel.app",
 ]
+
+
+async def require_blog_admin(
+    authorization: str | None = Header(default=None),
+    x_admin_secret: str | None = Header(default=None),
+) -> None:
+    """Gate privileged endpoints: 403 unless the caller is an admin.
+
+    Two accepted proofs:
+      * X-Admin-Secret header matching the server's ADMIN_SECRET
+        (for cron jobs / scripts), compared in constant time; or
+      * a valid Supabase session JWT whose profile row has role = 'admin'.
+
+    Every failure - missing header, bad secret, invalid token, non-admin
+    user, unverifiable role - returns 403 Forbidden.
+    """
+    settings = get_settings()
+    provided = (x_admin_secret or "").strip()
+    expected = settings.admin_secret
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return
+
+    try:
+        user_id = verify_bearer_token(authorization)
+    except HTTPException:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    role = await asyncio.to_thread(fetch_profile_role, user_id)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
 
 
 class ErrorCatchMiddleware:
@@ -174,7 +207,10 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/blog/generate", tags=["blog"], status_code=202)
-    async def generate_blog_post(background_tasks: BackgroundTasks) -> dict[str, object]:
+    async def generate_blog_post(
+        background_tasks: BackgroundTasks,
+        _admin: None = Depends(require_blog_admin),
+    ) -> dict[str, object]:
         """Kick off the staggered HYBRID Auto Blog pipeline in the background
         (returns 202 immediately — the work runs as a FastAPI BackgroundTask):
         Tavily research + Nemotron Ultra topic/keywords → Groq meta + article

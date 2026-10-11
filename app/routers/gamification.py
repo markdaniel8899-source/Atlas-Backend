@@ -11,6 +11,7 @@ squad endpoints were removed with migration 0012.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -67,6 +68,12 @@ def _rpc(client: Client, function: str, **payload: Any) -> Any:
     return result.data
 
 
+def _update_avatar(client: Client, user_id: str, url: str) -> None:
+    client.table("profiles").update(
+        {"avatar_url": url or None}
+    ).eq("id", user_id).execute()
+
+
 class EmptyRequest(BaseModel):
     """POST bodies that carry no data (kept for forward compatibility)."""
 
@@ -85,8 +92,10 @@ async def check_achievements(
     Called after quiz completion and on daily login; safe to call often -
     unlocks are idempotent (unique on user + achievement).
     """
-    user_id = _user_id_from(authorization)
-    data = _rpc(_service_client(), "check_user_achievements", p_user_id=user_id)
+    user_id = await asyncio.to_thread(_user_id_from, authorization)
+    data = await asyncio.to_thread(
+        _rpc, _service_client(), "check_user_achievements", p_user_id=user_id
+    )
     payload = data if isinstance(data, dict) else {}
     return {
         "ok": bool(payload.get("ok", True)),
@@ -104,7 +113,7 @@ async def select_avatar(
 
     Passing `avatar_url: null` clears the avatar (initials fallback).
     """
-    user_id = _user_id_from(authorization)
+    user_id = await asyncio.to_thread(_user_id_from, authorization)
 
     url = (body.avatar_url or "").strip()
     if url:
@@ -114,10 +123,11 @@ async def select_avatar(
                 detail="Only DiceBear avatar URLs are allowed.",
             )
 
-    client = _service_client()
-    client.table("profiles").update(
-        {"avatar_url": url or None}
-    ).eq("id", user_id).execute()
+    # Sync Supabase write runs in a worker thread so the event loop stays
+    # responsive while the PATCH is in flight.
+    await asyncio.to_thread(
+        _update_avatar, _service_client(), user_id, url
+    )
 
     return {"ok": True, "avatar_url": url or None}
 

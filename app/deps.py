@@ -68,3 +68,27 @@ async def get_current_user(
     thread so the sync supabase-py call never blocks the event loop.
     """
     return await asyncio.to_thread(verify_bearer_token, authorization)
+
+
+def fetch_profile_role(user_id: str) -> str | None:
+    """Service-role read of profiles.role (sync - wrap in asyncio.to_thread).
+
+    Returns None when Supabase is not configured, the query fails, or the
+    profile does not exist.
+    """
+    client = _service_client()
+    try:
+        result = (
+            client.table("profiles")
+            .select("role")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 - authz failures deny, never raise 500
+        return None
+    rows = getattr(result, "data", None) or []
+    if not rows:
+        return None
+    role = rows[0].get("role")
+    return str(role) if role else None
