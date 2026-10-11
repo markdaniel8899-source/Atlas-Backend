@@ -58,6 +58,7 @@ async def generate_quiz_endpoint(
 
 @router.post("/generate-pdf", response_model=QuizGenerateResponse)
 async def generate_quiz_from_pdf(
+    request: Request,
     file: UploadFile = File(...),
     topic: str = Form(""),
     kind: str = Form(...),
@@ -78,6 +79,11 @@ async def generate_quiz_from_pdf(
     """
     try:
         data = await file.read()
+    except Exception as exc:  # noqa: BLE001 - truncated/aborted upload
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to read the uploaded PDF. Please try a different file.",
+        ) from exc
     finally:
         # Close (and delete) the upload's spooled temp file right away.
         await file.close()
@@ -131,11 +137,21 @@ async def generate_quiz_from_pdf(
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="Invalid quiz options.") from exc
 
-    return await _generate(
-        req,
-        source_text=source_text,
-        auth_header=request.headers.get("authorization"),
-    )
+    try:
+        return await _generate(
+            req,
+            source_text=source_text,
+            auth_header=request.headers.get("authorization"),
+        )
+    except (HTTPException, ai_service.AIServiceError):
+        # Known failures keep their own status/handler (they are raised
+        # from inside the CORS layer, so their responses carry CORS headers).
+        raise
+    except Exception as exc:  # noqa: BLE001 - never leak a raw traceback
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate a quiz from this PDF. Please try again.",
+        ) from exc
 
 
 async def _generate(

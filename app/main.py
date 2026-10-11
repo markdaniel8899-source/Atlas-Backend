@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -8,6 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import ai_service
 from app.config import get_settings
@@ -30,6 +32,55 @@ REQUIRED_ORIGINS = [
     "http://127.0.0.1:5173",
     "https://atlas-frontend-pearl.vercel.app",
 ]
+
+
+class ErrorCatchMiddleware:
+    """Last line of defence for unhandled exceptions, INSIDE CORS.
+
+    Starlette's ServerErrorMiddleware sits *outside* CORSMiddleware, so a
+    bare 500 it emits carries no Access-Control-* headers — the browser
+    then reports the request as a CORS failure and hides the real error.
+    This middleware is registered BEFORE CORSMiddleware (add_middleware
+    prepends, so the CORS layer added afterwards ends up outermost), which
+    means any response it sends still travels through CORSMiddleware's
+    send-wrapper and keeps its CORS headers. The full traceback is printed
+    to stdout so it lands in the nohup server log.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:  # noqa: BLE001 - convert to a clean, CORS-safe 500
+            if response_started:
+                raise
+            print(
+                "[500] Unhandled exception:\n" + traceback.format_exc(),
+                flush=True,
+            )
+            await JSONResponse(
+                status_code=500,
+                content={
+                    "detail": (
+                        "Internal server error. "
+                        "Check the backend log for the full traceback."
+                    )
+                },
+            )(scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -72,6 +123,10 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Added FIRST: add_middleware prepends, so CORSMiddleware below ends up
+    # outermost and ErrorCatchMiddleware sits directly inside it.
+    app.add_middleware(ErrorCatchMiddleware)
 
     app.add_middleware(
         CORSMiddleware,
