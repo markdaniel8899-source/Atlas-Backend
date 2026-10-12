@@ -173,6 +173,13 @@ async def _generate(
     source_text: str | None = None,
     auth_header: str | None = None,
 ) -> QuizGenerateResponse:
+    # Course context is fetched ONLY when the payload explicitly names a
+    # course_id. Anything falsy (null/missing/0) forces the topic/subject
+    # path in build_plan: no course bundle, notes or roadmap is fetched,
+    # so an unrelated course can never bleed into the generated quiz.
+    if not req.course_id:
+        req.course_id = None
+
     # build_plan decides mode, domain, language, kinds and the exact
     # material server-side; its HTTPExceptions (400/404) pass through.
     plan = await build_plan(req, auth_header, source_text, _call_llm_small)

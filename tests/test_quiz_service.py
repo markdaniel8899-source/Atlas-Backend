@@ -233,11 +233,18 @@ class PromptTests(unittest.TestCase):
 
     def test_positive_prompt_has_no_negative_rules(self):
         system = build_system_prompt(self._plan(), 10, "medium")
+        # The CRITICAL topic lock at the very top is the one deliberate
+        # negative rule (strict topic enforcement); everything after the
+        # writer persona must stay positive-only.
+        head, sep, body = system.partition("\n\nYou are ATLAS Exam Writer")
+        self.assertTrue(sep, "topic lock must precede the writer persona")
+        self.assertTrue(head.startswith("CRITICAL:"), "topic lock must be first")
+        self.assertIn("DO NOT use any injected course context", head)
         for banned in ("FORBIDDEN", "STRICTLY", "STRICT", "DO NOT", "Never", "python", "print(", "def "):
-            self.assertNotIn(banned, system)
-        self.assertIn("Subject area: math", system)
-        self.assertIn("Allowed question kinds: mcq", system)
-        self.assertIn("Quiz language: English", system)
+            self.assertNotIn(banned, body)
+        self.assertIn("Subject area: math", body)
+        self.assertIn("Allowed question kinds: mcq", body)
+        self.assertIn("Quiz language: English", body)
 
     def test_output_format_only_allowed_kinds(self):
         math_format = build_output_format(self._plan())
@@ -286,7 +293,9 @@ class BuildPlanTests(unittest.TestCase):
             context="PYTHON NOTES: def foo(): print(1)",
             subject="programming",
         )
-        plan = run(build_plan(req, None, None, llm_never))
+        with patch("app.quiz_service.fetch_course_bundle", AsyncMock()) as fetch:
+            plan = run(build_plan(req, None, None, llm_never))
+        fetch.assert_not_awaited()  # no course_id -> zero course context
         self.assertEqual(plan.mode, "topic_only")
         self.assertEqual(plan.domain, "math")
         self.assertEqual(plan.kinds, ["mcq"])
@@ -683,7 +692,12 @@ class RouteTests(unittest.TestCase):
         self.assertIn("Allowed question kinds: mcq", system)
         self.assertNotIn("STRICTLY", system)
         self.assertNotIn("FORBIDDEN", system)
-        self.assertNotIn("python", system.lower())
+        # The CRITICAL lock may name Python as its example, but the client's
+        # context/subject must never leak into the prompt as material.
+        self.assertNotIn("python notes", system.lower())
+        self.assertNotIn("def foo", system.lower())
+        self.assertNotIn("print(1)", system.lower())
+        self.assertTrue(system.startswith("CRITICAL:"), "topic lock must be first")
         self.assertEqual(user, "Create the quiz now.")  # zero notes sent
 
 

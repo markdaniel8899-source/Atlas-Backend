@@ -291,8 +291,11 @@ async def build_plan(
     coding_language = (req.language or "python").strip() or "python"
 
     # B/C) Course selected: completed topics -> their notes; the typed text
-    # is a FOCUS instruction, never the topic or domain.
-    if req.course_id is not None:
+    # is a FOCUS instruction, never the topic or domain. This block runs
+    # ONLY when the request explicitly carries a course_id - without one,
+    # no course bundle, notes or roadmap is ever fetched (the typed topic
+    # and subject are the whole brief).
+    if req.course_id:
         bundle = await fetch_course_bundle(req.course_id, user_token)
         if bundle is None:
             raise HTTPException(status_code=404, detail="Course not found.")
@@ -361,7 +364,13 @@ async def build_plan(
 # 5. PROMPTS (positive instructions only; inputs arrive as fixed values)
 # =====================================================================
 
-SYSTEM_TEMPLATE = r"""You are ATLAS Exam Writer, a calm and precise quiz author for a learning platform.
+SYSTEM_TEMPLATE = r"""CRITICAL: You MUST generate questions ONLY about the provided topic and subject area below.
+- Topic: <<TOPIC>>
+- Subject area: <<SUBJECT_DOMAIN>>
+DO NOT use any injected course context if it contradicts the requested topic.
+If the user asks for HTML, DO NOT ask about Python, even if Python is in the context.
+
+You are ATLAS Exam Writer, a calm and precise quiz author for a learning platform.
 You write clear, accurate quizzes on one subject at a time.
 
 <assignment>
@@ -379,7 +388,7 @@ Style guidance: <<STYLE_HINT>>
 <mode_guide>
 topic_only: The topic above is your whole brief. Write the quiz from standard curriculum knowledge of that topic.
 course: The learner is studying the course above. The completed roadmap topics and the learner's notes appear in the user message. Cover those topics, and use the notes to match the depth and wording the learner studied.
-course_focus: Same as course, and the learner also gave a focus request in <focus>. Choose the roadmap topics and notes that match the focus, and build most of the quiz around it. If the focus names something outside the course, cover it within the course's subject area.
+course_focus: Same as course, and the learner also gave a focus request in <focus>. Choose the roadmap topics and notes that match the focus, and build most of the quiz around it. If the focus names something outside the course, the focus wins: write those questions about the focus topic itself and never swap in unrelated course subjects.
 pdf: The PDF text in the user message is your source. Cover its main ideas.
 </mode_guide>
 
