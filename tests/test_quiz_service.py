@@ -35,6 +35,7 @@ from app.quiz_service import (
     build_system_prompt,
     build_user_message,
     classify_domain,
+    detect_dev_language,
     generate_quiz,
     kinds_for,
     pick_notes,
@@ -233,16 +234,18 @@ class PromptTests(unittest.TestCase):
 
     def test_positive_prompt_has_no_negative_rules(self):
         system = build_system_prompt(self._plan(), 10, "medium")
-        # The CRITICAL topic lock at the very top is the one deliberate
-        # negative rule (strict topic enforcement); everything after the
+        # The CRITICAL RULES block at the very top is the one deliberate
+        # negative-rule area (the user's four rules); everything after the
         # writer persona must stay positive-only.
         head, sep, body = system.partition("\n\nYou are ATLAS Exam Writer")
-        self.assertTrue(sep, "topic lock must precede the writer persona")
-        self.assertTrue(head.startswith("CRITICAL:"), "topic lock must be first")
-        self.assertIn("DO NOT use any injected course context", head)
+        self.assertTrue(sep, "rules block must precede the writer persona")
+        self.assertTrue(head.startswith("CRITICAL RULES:"), "rules must be first")
+        for rule in ("1. CONTEXT:", "2. SUBJECT BOUNDARIES:", "3. QUESTION TYPES:", "4. PROGRAMMING LANGUAGES:"):
+            self.assertIn(rule, head)
         for banned in ("FORBIDDEN", "STRICTLY", "STRICT", "DO NOT", "Never", "python", "print(", "def "):
             self.assertNotIn(banned, body)
         self.assertIn("Subject area: math", body)
+        self.assertIn("Programming course: false", body)
         self.assertIn("Allowed question kinds: mcq", body)
         self.assertIn("Quiz language: English", body)
 
@@ -258,12 +261,24 @@ class PromptTests(unittest.TestCase):
             self.assertIn(f'"kind": "{kind}"', prog_format)
 
     def test_coding_language_line_only_for_programming(self):
+        # No detected language -> no line, even on a programming quiz.
         math_system = build_system_prompt(self._plan(), 5, "medium")
         self.assertNotIn("Coding language", math_system)
 
         prog = self._plan(domain="programming", kinds=["code"])
+        self.assertNotIn("Coding language", build_system_prompt(prog, 5, "medium"))
+
+        prog = self._plan(
+            domain="programming", kinds=["code"], coding_language="python"
+        )
         prog_system = build_system_prompt(prog, 5, "medium")
         self.assertIn("Coding language for code questions: python", prog_system)
+
+        # Detected language but MCQ-only quiz -> no coding line.
+        mcq_only = self._plan(
+            domain="programming", kinds=["mcq"], coding_language="python"
+        )
+        self.assertNotIn("Coding language", build_system_prompt(mcq_only, 5, "medium"))
 
     def test_topic_only_user_message_has_no_material(self):
         message = build_user_message(self._plan())
@@ -562,6 +577,194 @@ class ValidateQuizTests(unittest.TestCase):
             validate_quiz(data, self.math_plan, 5)
 
 
+class Rule2DetectionTests(unittest.TestCase):
+    def test_detect_dev_language(self):
+        cases = {
+            "Python Foundations": "python",
+            "React Hooks": "react",
+            "JavaScript basics": "javascript",
+            "TypeScript generics": "typescript",
+            "Next.js routing": "javascript",
+            "C++ pointers": "c++",
+            "C# generics": "c#",
+            "Kotlin coroutines": "kotlin",
+            "Ruby gems": "ruby",
+            "Rust ownership": "rust",
+            "HTML forms": "html",
+            "CSS grid": "css",
+            "CMD basics": "bash",
+            "learn golang": "go",
+            "Swift structs": "swift",
+            "SQL joins": "sql",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(detect_dev_language(text), expected, text)
+
+    def test_word_boundaries(self):
+        self.assertIsNone(detect_dev_language("reaction kinetics"))  # react
+        self.assertIsNone(detect_dev_language("English Grammar"))
+        self.assertIsNone(detect_dev_language("History of Rome"))
+        self.assertIsNone(detect_dev_language(""))
+        self.assertEqual(detect_dev_language("javascript tutorial"), "javascript")
+
+    def test_rule2_course_title_wins_without_llm_or_save(self):
+        bundle = make_bundle(
+            course={"id": 3, "title": "Ruby Fundamentals", "domain": "", "description": ""}
+        )
+        with patch(
+            "app.quiz_service.fetch_course_bundle", AsyncMock(return_value=bundle)
+        ), patch(
+            "app.quiz_service.save_course_domain", AsyncMock(return_value=True)
+        ) as save:
+            plan = run(build_plan(make_req(course_id=1), "tok", None, llm_never))
+        self.assertEqual(plan.domain, "programming")
+        self.assertEqual(plan.coding_language, "ruby")
+        self.assertEqual(plan.kinds, ["mcq"])  # the UI asked for MCQs only
+        save.assert_not_awaited()
+
+    def test_rule2_topic_detection(self):
+        plan = run(build_plan(make_req(topic="CMD basics", kind="code"), None, None, llm_never))
+        self.assertEqual(plan.domain, "programming")
+        self.assertEqual(plan.coding_language, "bash")
+        self.assertEqual(plan.kinds, ["code"])
+
+    def test_rule2_detected_language_drives_the_prompt(self):
+        plan = run(build_plan(make_req(topic="HTML forms", kind="code"), None, None, llm_never))
+        system = build_system_prompt(plan, 5, "medium")
+        self.assertIn("Programming course: true", system)
+        self.assertIn("Coding language for code questions: html", system)
+        self.assertNotIn("Coding language for code questions: python", system)
+
+
+class Rule3QuestionTypeTests(unittest.TestCase):
+    def setUp(self):
+        self.plan = QuizPlan(
+            mode="topic_only",
+            topic="Python loops",
+            domain="programming",
+            kinds=["mcq"],
+            language="English",
+            coding_language="python",
+        )
+
+    def test_prompt_offers_only_mcq_shape(self):
+        system = build_system_prompt(self.plan, 5, "medium")
+        self.assertIn("Allowed question kinds: mcq", system)
+        self.assertIn("3. QUESTION TYPES:", system)
+        self.assertNotIn('"kind": "code"', system)
+        self.assertNotIn('"kind": "debug"', system)
+
+    def test_code_reply_is_rejected(self):
+        data = {
+            "questions": [
+                {
+                    "kind": "code",
+                    "prompt": "Write a loop",
+                    "reference_solution": "for i in range(3): pass",
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            validate_quiz(data, self.plan, 1)
+
+
+class LightDebugValidatorTests(unittest.TestCase):
+    def setUp(self):
+        self.plan = QuizPlan(
+            mode="topic_only",
+            topic="Python bugs",
+            domain="programming",
+            kinds=["debug"],
+            language="English",
+            coding_language="python",
+        )
+
+    def item(self, **overrides) -> dict:
+        base = {
+            "kind": "debug",
+            "prompt": "Fix the bug",
+            "code": "x = 1\nprint(x)\ny = 2",
+            "buggy_line": 2,
+            "reference_solution": "x = 1\ny = 2\nprint(y)",
+            "explanation": "The order is wrong.",
+        }
+        base.update(overrides)
+        return base
+
+    def test_valid_debug_passes_and_gets_the_detected_language(self):
+        questions = validate_quiz({"questions": [self.item()]}, self.plan, 1)
+        self.assertEqual(questions[0].language, "python")
+
+    def test_buggy_line_must_point_at_a_real_line(self):
+        with self.assertRaisesRegex(ValueError, "must point at a line"):
+            validate_quiz({"questions": [self.item(buggy_line=0)]}, self.plan, 1)
+        with self.assertRaisesRegex(ValueError, "must point at a line"):
+            validate_quiz({"questions": [self.item(buggy_line=9)]}, self.plan, 1)
+
+    def test_fix_is_required_and_must_change_the_code(self):
+        with self.assertRaisesRegex(ValueError, "needs a reference_solution"):
+            validate_quiz({"questions": [self.item(reference_solution="")]}, self.plan, 1)
+        with self.assertRaisesRegex(ValueError, "identical to the buggy code"):
+            validate_quiz(
+                {"questions": [self.item(reference_solution="x = 1\nprint(x)\ny = 2")]},
+                self.plan,
+                1,
+            )
+
+    def test_debug_nudge_names_the_fix_fields(self):
+        calls: list[str] = []
+
+        async def flaky(system: str, user: str) -> ai_service.AIResult:
+            calls.append(user)
+            if len(calls) == 1:
+                text = json.dumps({"questions": [self.item(buggy_line=9)]})
+            else:
+                text = json.dumps({"questions": [self.item()]})
+            return ai_service.AIResult(text=text, model="mock-model", task=ai_service.Task.QUIZ)
+
+        questions, _ = run(generate_quiz(self.plan, 1, "medium", flaky))
+        self.assertEqual(len(questions), 1)
+        self.assertIn("must be a real 1-based line", calls[1])
+
+
+class LanguageDecisionTests(unittest.TestCase):
+    def test_detected_language_overrides_the_models_guess(self):
+        plan = QuizPlan(
+            mode="topic_only",
+            topic="Python loops",
+            domain="programming",
+            kinds=["code"],
+            language="English",
+            coding_language="python",
+        )
+        item = {
+            "kind": "code",
+            "prompt": "Write a function",
+            "language": "ruby",
+            "reference_solution": "def f(): pass",
+        }
+        questions = validate_quiz({"questions": [item]}, plan, 1)
+        self.assertEqual(questions[0].language, "python")
+
+    def test_undetected_language_passes_the_models_value_through(self):
+        plan = QuizPlan(
+            mode="topic_only",
+            topic="Algorithm design",
+            domain="programming",
+            kinds=["code"],
+            language="English",
+            coding_language="",
+        )
+        item = {
+            "kind": "code",
+            "prompt": "Write a function",
+            "language": "ruby",
+            "reference_solution": "def f(): pass",
+        }
+        questions = validate_quiz({"questions": [item]}, plan, 1)
+        self.assertEqual(questions[0].language, "ruby")
+
+
 class GenerateQuizTests(unittest.TestCase):
     def setUp(self):
         self.plan = QuizPlan(
@@ -692,12 +895,13 @@ class RouteTests(unittest.TestCase):
         self.assertIn("Allowed question kinds: mcq", system)
         self.assertNotIn("STRICTLY", system)
         self.assertNotIn("FORBIDDEN", system)
-        # The CRITICAL lock may name Python as its example, but the client's
-        # context/subject must never leak into the prompt as material.
+        # The CRITICAL RULES block may name Python as its example, but the
+        # client's context/subject must never leak into the prompt as material.
         self.assertNotIn("python notes", system.lower())
         self.assertNotIn("def foo", system.lower())
         self.assertNotIn("print(1)", system.lower())
-        self.assertTrue(system.startswith("CRITICAL:"), "topic lock must be first")
+        self.assertTrue(system.startswith("CRITICAL RULES:"), "rules must be first")
+        self.assertIn("Programming course: false", system)
         self.assertEqual(user, "Create the quiz now.")  # zero notes sent
 
 

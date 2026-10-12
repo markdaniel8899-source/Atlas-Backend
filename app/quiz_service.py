@@ -169,7 +169,47 @@ def style_for(domain: str, requested: str | None) -> str:
 
 
 # =====================================================================
-# 2. LANGUAGE (decided by backend, never inferred by the LLM)
+# 2. RULE 2 - TITLE/TOPIC DETECTION (no LLM, no stored column)
+# =====================================================================
+
+# The language or framework a title/topic NAMES decides both the subject
+# and the coding language. Word-boundary matching (java never matches
+# javascript, react never matches reaction); longest match wins because
+# the (?![a-z]) lookahead rejects a short marker inside a longer word.
+_DEV_MARKERS = (
+    "javascript", "typescript", "next.js", "powershell", "golang",
+    "python", "html", "css", "react", "rust", "java", "kotlin", "ruby",
+    "swift", "c++", "c#", "bash", "shell", "cmd", "terminal", "node",
+    "sql", "php", "go",
+)
+_DEV_ALIASES = {
+    "cmd": "bash", "shell": "bash", "terminal": "bash", "powershell": "bash",
+    "node": "javascript", "next.js": "javascript", "golang": "go",
+}
+_DEV_RE = re.compile(
+    r"(?<![a-z0-9])(?:" + "|".join(re.escape(m) for m in _DEV_MARKERS) + r")(?![a-z])"
+)
+
+
+def detect_dev_language(text: str) -> str | None:
+    """Rule 2: the development language named by `text`, or None when the
+    text names none (e.g. "English Grammar", "Basic Math")."""
+    match = _DEV_RE.search((text or "").lower())
+    if not match:
+        return None
+    return _DEV_ALIASES.get(match.group(0), match.group(0))
+
+
+async def _domain_for(text: str, call_llm_small: CallLlmSmall) -> str:
+    """Rule 2: a title/topic naming a language IS a programming quiz and
+    needs no LLM call; everything else uses the baseline classifier."""
+    if detect_dev_language(text):
+        return "programming"
+    return await classify_domain(text, call_llm_small)
+
+
+# =====================================================================
+# 3. LANGUAGE (decided by backend, never inferred by the LLM)
 # =====================================================================
 
 URDU_RE = re.compile("[؀-ۿݐ-ݿࢠ-ࣿ]")
@@ -187,7 +227,7 @@ def resolve_language(requested: str | None, text: str) -> str:
 
 
 # =====================================================================
-# 3. NOTE FILTERING (used only in course / course_focus modes)
+# 4. NOTE FILTERING (used only in course / course_focus modes)
 # =====================================================================
 
 CODE_PATTERNS = re.compile(
@@ -253,7 +293,7 @@ def pick_notes(
 
 
 # =====================================================================
-# 4. QUIZ PLAN (single source of truth for one generation)
+# 5. QUIZ PLAN (single source of truth for one generation)
 # =====================================================================
 
 
@@ -268,7 +308,7 @@ class QuizPlan:
     roadmap_topics: list[str] = field(default_factory=list)
     focus: str = ""
     style_hint: str = ""
-    coding_language: str = "python"
+    coding_language: str = ""  # Rule 2: detected from the title/topic, never assumed
 
 
 async def build_plan(
@@ -283,12 +323,11 @@ async def build_plan(
     PDF upload, then a typed topic. The PDF endpoint fills `topic` with the
     uploaded file's name, so the PDF must be checked before the topic or a
     PDF upload would never be used. The client's `context` / `subject` are
-    never read: material comes only from the server-side course bundle or
-    the uploaded PDF.
+    never read (Rule 1: strict context isolation - a course quiz sends only
+    this course's notes, a custom topic sends none at all).
     """
     text = (req.topic or "").strip()
     requested = req.kind.value if req.kind else "mixed"
-    coding_language = (req.language or "python").strip() or "python"
 
     # B/C) Course selected: completed topics -> their notes; the typed text
     # is a FOCUS instruction, never the topic or domain. This block runs
@@ -301,10 +340,17 @@ async def build_plan(
             raise HTTPException(status_code=404, detail="Course not found.")
         course = bundle["course"]
         title = str(course.get("title") or "").strip() or f"Course {req.course_id}"
-        domain = str(course.get("domain") or "").strip().lower()
-        if domain not in VALID_DOMAINS:
-            domain = await classify_domain(title, call_llm_small)
-            await save_course_domain(req.course_id, domain, user_token)
+        # Rule 2: the title names the language -> programming, no LLM and
+        # nothing saved; otherwise the stored domain decides (classified
+        # lazily only when the course has none yet).
+        coding_language = detect_dev_language(title) or ""
+        if coding_language:
+            domain = "programming"
+        else:
+            domain = str(course.get("domain") or "").strip().lower()
+            if domain not in VALID_DOMAINS:
+                domain = await classify_domain(title, call_llm_small)
+                await save_course_domain(req.course_id, domain, user_token)
         completed = bundle["completed_titles"]
         if not completed:
             raise HTTPException(
@@ -329,7 +375,8 @@ async def build_plan(
 
     # D) Uploaded PDF: its text is the whole source.
     if pdf_text:
-        domain = await classify_domain(pdf_text[:2000], call_llm_small)
+        head = pdf_text[:2000]
+        domain = await _domain_for(head, call_llm_small)
         return QuizPlan(
             mode="pdf",
             topic="Uploaded PDF",
@@ -338,13 +385,13 @@ async def build_plan(
             language=resolve_language(req.language, pdf_text[:500]),
             notes_text=pdf_text[:8000],
             style_hint=style_for(domain, requested),
-            coding_language=coding_language,
+            coding_language=detect_dev_language(head) or "",
         )
 
     # A) General + typed topic: the topic ONLY - no notes, no roadmap, no
-    # course data ever leaves the server for this mode.
+    # course data ever leaves the server for this mode (Rule 1).
     if text:
-        domain = await classify_domain(text, call_llm_small)
+        domain = await _domain_for(text, call_llm_small)
         return QuizPlan(
             mode="topic_only",
             topic=text,
@@ -352,7 +399,7 @@ async def build_plan(
             kinds=kinds_for(domain, requested),
             language=resolve_language(req.language, text),
             style_hint=style_for(domain, requested),
-            coding_language=coding_language,
+            coding_language=detect_dev_language(text) or "",
         )
 
     raise HTTPException(
@@ -361,14 +408,14 @@ async def build_plan(
 
 
 # =====================================================================
-# 5. PROMPTS (positive instructions only; inputs arrive as fixed values)
+# 6. PROMPTS (positive instructions only; inputs arrive as fixed values)
 # =====================================================================
 
-SYSTEM_TEMPLATE = r"""CRITICAL: You MUST generate questions ONLY about the provided topic and subject area below.
-- Topic: <<TOPIC>>
-- Subject area: <<SUBJECT_DOMAIN>>
-DO NOT use any injected course context if it contradicts the requested topic.
-If the user asks for HTML, DO NOT ask about Python, even if Python is in the context.
+SYSTEM_TEMPLATE = r"""CRITICAL RULES:
+1. CONTEXT: Only use the provided course notes. If no course is selected, use only your general knowledge of the topic. Never mix courses.
+2. SUBJECT BOUNDARIES: If the topic is non-programming (like English Grammar), DO NOT write any code or programming logic.
+3. QUESTION TYPES: If the user requested only MCQs, generate ONLY MCQs. Do not add code blocks or debug questions.
+4. PROGRAMMING LANGUAGES: If the course is a specific language (e.g., Ruby, Rust, React), write questions strictly for that language. Do not default to Python.
 
 You are ATLAS Exam Writer, a calm and precise quiz author for a learning platform.
 You write clear, accurate quizzes on one subject at a time.
@@ -376,6 +423,7 @@ You write clear, accurate quizzes on one subject at a time.
 <assignment>
 Mode: <<MODE>>
 Subject area: <<SUBJECT_DOMAIN>>
+Programming course: <<IS_PROGRAMMING>>
 Topic or course: <<TOPIC>>
 Quiz language: <<LANGUAGE>>
 Number of questions: <<NUM_QUESTIONS>>
@@ -439,6 +487,7 @@ _OUTPUT_SHAPES: dict[str, str] = {
         '      "prompt": "text of the task",\n'
         '      "code": "code containing one deliberate bug",\n'
         '      "buggy_line": 3,\n'
+        '      "reference_solution": "the full corrected code",\n'
         '      "explanation": "one or two sentences"\n'
         "    }"
     ),
@@ -454,6 +503,16 @@ _OUTPUT_SHAPES: dict[str, str] = {
 }
 
 
+# Authoring note shown only when debug questions are allowed: the light
+# debug validator (buggy_line inside the code + a fix that really fixes)
+# needs these two fields to exist and mean something.
+DEBUG_AUTHORING = (
+    "For a debug question: buggy_line is the 1-based line number of the bug "
+    "inside code, and reference_solution is the full corrected code - it must "
+    "differ from the buggy code."
+)
+
+
 def build_output_format(plan: QuizPlan) -> str:
     """Only the shapes whose kind is allowed for this quiz - a math quiz is
     never shown a code question shape."""
@@ -463,21 +522,30 @@ def build_output_format(plan: QuizPlan) -> str:
         if kind in _OUTPUT_SHAPES
     ]
     body = ",\n    ".join(shapes)
-    return (
+    text = (
         '{\n  "questions": [\n    ' + body + "\n  ]\n}\n"
         "Each object carries only the fields shown for its kind, "
         "including every field of that kind."
     )
+    if "debug" in plan.kinds:
+        text += " " + DEBUG_AUTHORING
+    return text
 
 
 def build_system_prompt(plan: QuizPlan, n: int, difficulty: str) -> str:
+    # Rule 4 of the header only gets a concrete language when Rule 2
+    # detected one; an unknown language lets the model pick its own.
     coding_line = ""
-    if set(plan.kinds) & {"code", "debug", "output"}:
+    if plan.coding_language and set(plan.kinds) & {"code", "debug", "output"}:
         coding_line = f"Coding language for code questions: {plan.coding_language}"
     return (
         SYSTEM_TEMPLATE
         .replace("<<MODE>>", plan.mode)
         .replace("<<SUBJECT_DOMAIN>>", plan.domain)
+        .replace(
+            "<<IS_PROGRAMMING>>",
+            "true" if plan.domain == "programming" else "false",
+        )
         .replace("<<TOPIC>>", plan.topic)
         .replace("<<LANGUAGE>>", plan.language)
         .replace("<<NUM_QUESTIONS>>", str(n))
@@ -507,7 +575,7 @@ def build_user_message(plan: QuizPlan) -> str:
 
 
 # =====================================================================
-# 6. JSON SANITIZER (fixes the 502s: LaTeX backslashes break json.loads)
+# 7. JSON SANITIZER (fixes the 502s: LaTeX backslashes break json.loads)
 # =====================================================================
 
 LATEX_MAP = {
@@ -557,7 +625,7 @@ def sanitize_llm_json(raw: str) -> str:
 
 
 # =====================================================================
-# 7. VALIDATION
+# 8. VALIDATION
 # =====================================================================
 
 
@@ -587,7 +655,9 @@ def validate_quiz(data: Any, plan: QuizPlan, n: int) -> list[QuizQuestion]:
                 f"for {plan.domain} (allowed: {', '.join(plan.kinds)})"
             )
         payload["kind"] = kind
-        if kind == "code" and not str(payload.get("language") or "").strip():
+        # Rule 2/4: when the backend detected a language, IT decides -
+        # the model's guess never overrides it. Undetected -> model's value.
+        if kind in ("code", "debug", "output") and plan.coding_language:
             payload["language"] = plan.coding_language
         try:
             question = QuizQuestion.model_validate(payload)
@@ -598,6 +668,10 @@ def validate_quiz(data: Any, plan: QuizPlan, n: int) -> list[QuizQuestion]:
         _validate_question(question, plan, index)
         questions.append(question)
     return questions
+
+
+def _norm_code(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _validate_question(q: QuizQuestion, plan: QuizPlan, index: int) -> None:
@@ -628,11 +702,25 @@ def _validate_question(q: QuizQuestion, plan: QuizPlan, index: int) -> None:
                 f"question {index}: a code question needs a reference_solution"
             )
     elif q.kind is QuizKind.DEBUG:
-        if not q.code.strip():
+        # Light checks only: the bug must point at a real line and the fix
+        # must actually change something (no AST/difflib machinery).
+        lines = q.code.splitlines()
+        if not lines:
             raise ValueError(f"question {index}: a debug question needs code")
-        if q.buggy_line is None or q.buggy_line < 1:
+        if q.buggy_line is None or not 1 <= q.buggy_line <= len(lines):
             raise ValueError(
-                f"question {index}: buggy_line must be a 1-based line number"
+                f"question {index}: buggy_line must point at a line of the "
+                f"code (1-{len(lines)})"
+            )
+        if not q.reference_solution.strip():
+            raise ValueError(
+                f"question {index}: a debug question needs a "
+                f"reference_solution (the corrected code)"
+            )
+        if _norm_code(q.reference_solution) == _norm_code(q.code):
+            raise ValueError(
+                f"question {index}: reference_solution must fix the bug - it "
+                f"is identical to the buggy code"
             )
     elif q.kind is QuizKind.OUTPUT:
         if not q.code.strip() or not q.correct_output.strip():
@@ -656,7 +744,7 @@ def _validate_question(q: QuizQuestion, plan: QuizPlan, index: int) -> None:
 
 
 # =====================================================================
-# 8. GENERATION WITH RETRY
+# 9. GENERATION WITH RETRY
 # =====================================================================
 
 
@@ -682,6 +770,12 @@ async def generate_quiz(
                 f"Please send the complete quiz again as one JSON object, in "
                 f"{plan.language}, using only these kinds: {', '.join(plan.kinds)}."
             )
+            if "debug" in plan.kinds:
+                nudge += (
+                    " For debug questions: buggy_line must be a real 1-based "
+                    "line of the code and reference_solution must be the "
+                    "corrected code."
+                )
         result = await call_llm(system, user + nudge)
         try:
             data = json.loads(sanitize_llm_json(result.text))
