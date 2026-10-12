@@ -74,7 +74,9 @@ from supabase import Client, create_client
 from tavily import TavilyClient
 
 from app import ai_service
+from app.cache import clear_all as clear_read_caches
 from app.config import get_settings
+from app.plugins.seo_checker import evaluate_seo_lightweight
 
 # Every print() in this module goes to stdout, which `nohup ... > server.log`
 # captures. Non-tty stdout is BLOCK-buffered (8KB), so step logs sat in the
@@ -583,7 +585,9 @@ async def _meta_chunk(research: Research) -> tuple[str, str]:
 # ────────────────────────────── Stage 2 · Write ───────────────────────────────
 
 
-async def _write_article(research: Research) -> dict[str, Any]:
+async def _write_article(
+    research: Research, seo_feedback: str | None = None
+) -> dict[str, Any]:
     sources = "\n".join(f"- {s}" for s in research.snippets) or "(none)"
     user_prompt = (
         f"Trending topic: {research.topic}\n"
@@ -597,6 +601,13 @@ async def _write_article(research: Research) -> dict[str, Any]:
         "(delve, moreover, testament). Avoid keyword stuffing. Naturally place "
         "the extracted keywords. 100% unique, no plagiarism."
     )
+    if seo_feedback:
+        user_prompt += (
+            "\n\nIMPORTANT: a lightweight SEO checker rejected your previous "
+            f"draft. Fix ALL of these issues in this rewrite:\n- {seo_feedback}\n"
+            "Keep the same topic, keywords and research; make the fixes "
+            "minimally and keep the article ~1000 words."
+        )
 
     text = await _groq_with_gemini_fallback(
         _WRITER_SYSTEM, user_prompt, temperature=0.8, max_tokens=4096
@@ -1055,6 +1066,49 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 return None
             await asyncio.sleep(WRITE_PAUSE_SECONDS)
 
+            # SEO Gate — lightweight on-page rules (stdlib only, zero RAM).
+            # A failing draft gets ONE rewrite with the exact feedback; a
+            # second failure discards the run WITHOUT saving anything.
+            seo_keyword = research.keywords[0] if research.keywords else research.topic
+            seo_report = evaluate_seo_lightweight(
+                meta_title, article["content_html"], seo_keyword, meta_description
+            )
+            if not seo_report["passed"]:
+                print(
+                    f"[AutoBlog Background] SEO gate score "
+                    f"{seo_report['score']}/100 — {seo_report['feedback']} "
+                    "One rewrite attempt...",
+                    flush=True,
+                )
+                try:
+                    article = await _write_article(
+                        research, seo_feedback=seo_report["feedback"]
+                    )
+                except Exception as exc:  # noqa: BLE001 - discard, never crash
+                    print(
+                        "[AutoBlog Background] SEO gate rewrite failed "
+                        f"({type(exc).__name__}: {exc}). Draft discarded "
+                        "(nothing saved).",
+                        flush=True,
+                    )
+                    return None
+                seo_report = evaluate_seo_lightweight(
+                    meta_title, article["content_html"], seo_keyword, meta_description
+                )
+            if not seo_report["passed"]:
+                print(
+                    f"[AutoBlog Background] SEO gate FAILED "
+                    f"({seo_report['score']}/100) — {seo_report['feedback']} "
+                    "Draft discarded (nothing saved).",
+                    flush=True,
+                )
+                return None
+            print(
+                f"[AutoBlog Background] SEO gate passed "
+                f"({seo_report['score']}/100).",
+                flush=True,
+            )
+
             # Step 5/6 — Images (Pixabay → Pollinations fallback, one by one).
             print(
                 "[AutoBlog Background] Step 5: Fetching images "
@@ -1096,6 +1150,7 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     "keywords": research.keywords,
                 }
                 post = await asyncio.to_thread(_insert_post, payload)
+                clear_read_caches()  # new post -> drop the public read caches
                 print(
                     f"[AutoBlog Background] Step 6/6: Saved post "
                     f"id={post.get('id')} slug={post.get('slug')}",

@@ -16,7 +16,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app import ai_service
 from app.config import get_settings
 from app.deps import fetch_profile_role, verify_bearer_token
-from app.routers import chat, gamification, quizzes, roadmaps
+from app.routers import blog, chat, gamification, quizzes, roadmaps
 from app.services import auto_blog
 
 # Background-task logs go to stdout (the nohup log). A non-tty stdout is
@@ -171,6 +171,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(blog.router)
     app.include_router(chat.router)
     app.include_router(quizzes.router)
     app.include_router(roadmaps.router)
