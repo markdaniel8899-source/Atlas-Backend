@@ -655,10 +655,19 @@ def validate_quiz(data: Any, plan: QuizPlan, n: int) -> list[QuizQuestion]:
                 f"for {plan.domain} (allowed: {', '.join(plan.kinds)})"
             )
         payload["kind"] = kind
-        # Rule 2/4: when the backend detected a language, IT decides -
-        # the model's guess never overrides it. Undetected -> model's value.
-        if kind in ("code", "debug", "output") and plan.coding_language:
-            payload["language"] = plan.coding_language
+        # Rule 2/4: the title decides first; when it named no language, read
+        # one off the question itself (prompt/code) - only then let the
+        # model's own value stand. Never a blind "python".
+        if kind in ("code", "debug", "output"):
+            payload["language"] = (
+                plan.coding_language
+                or detect_dev_language(
+                    f"{payload.get('prompt', '')} {payload.get('code', '')} "
+                    f"{payload.get('starter_code', '')} "
+                    f"{payload.get('correct_output', '')}"
+                )
+                or str(payload.get("language") or "").strip()
+            )
         try:
             question = QuizQuestion.model_validate(payload)
         except ValidationError as exc:

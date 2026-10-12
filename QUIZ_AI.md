@@ -323,9 +323,11 @@ MCQ → local compare. code/debug/output → Prompt D (section 5).
   `1..len(code.splitlines())`, non-empty `reference_solution`, and the fix
   must actually change the code (whitespace-normalized equality → rejected).
   No AST parsing, no similarity scoring,
-- `code` / `debug` / `output` questions get `payload["language"] =
-  plan.coding_language` **when Rule 2 detected one** — the badge is always
-  backend-decided; undetected → the model's value passes through,
+- `code` / `debug` / `output` questions get a backend-decided `language` in
+  this order: `plan.coding_language` (Rule 2, title/topic) → marker read off
+  the question's own prompt/code (catches a typo'd title like "HTLM BASICS"
+  when the question says "HTML snippet") → the model's value. Never a blind
+  `"python"`; genuinely unknown stays empty (the UI hides the badge),
 - **non-programming quizzes may not contain any code** (fences or code-shaped text),
 - language script check: English quiz → no Urdu script; Urdu quiz → must contain
   Urdu script (per-question, enforced on prompt/options/explanation/code fields).

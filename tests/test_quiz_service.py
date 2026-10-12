@@ -764,6 +764,44 @@ class LanguageDecisionTests(unittest.TestCase):
         questions = validate_quiz({"questions": [item]}, plan, 1)
         self.assertEqual(questions[0].language, "ruby")
 
+    def test_falls_back_to_the_question_content_when_the_title_said_nothing(self):
+        # "HTLM BASICS" (typo) matches no title marker - the question itself
+        # says "HTML snippet", so the badge must show html, not python.
+        plan = QuizPlan(
+            mode="topic_only",
+            topic="HTLM BASICS",
+            domain="programming",
+            kinds=["output"],
+            language="English",
+            coding_language="",
+        )
+        item = {
+            "kind": "output",
+            "prompt": "What is the exact output of the HTML snippet when rendered in a browser?",
+            "code": '<a href="https://example.com">Click here</a>',
+            "correct_output": "Click here",
+            "explanation": "The anchor renders as a link.",
+        }
+        questions = validate_quiz({"questions": [item]}, plan, 1)
+        self.assertEqual(questions[0].language, "html")
+
+    def test_no_language_anywhere_stays_empty(self):
+        plan = QuizPlan(
+            mode="topic_only",
+            topic="Algorithms",
+            domain="programming",
+            kinds=["code"],
+            language="English",
+            coding_language="",
+        )
+        item = {
+            "kind": "code",
+            "prompt": "Write a sorting routine",
+            "reference_solution": "def sort(a): return sorted(a)",
+        }
+        questions = validate_quiz({"questions": [item]}, plan, 1)
+        self.assertEqual(questions[0].language, "")
+
 
 class GenerateQuizTests(unittest.TestCase):
     def setUp(self):
