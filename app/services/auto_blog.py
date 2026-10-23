@@ -14,8 +14,9 @@ HYBRID MODEL ROUTING — every provider does what it is best at:
   - Gemini     : automatic fallback for steps 3-4 ONLY when
                  Groq returns 429 (rate limit) or 5xx.         [steps 3-4]
   - Pixabay    : cover + in-article photos via the Pixabay API
-                 (PIXABAY_API_KEY). Pollinations.ai URL is the
-                 per-image fallback when Pixabay has no hits.   [step 5]
+                 (PIXABAY_API_KEY). Covers are persisted to R2;
+                 in-article images keep external CDN URLs.        [step 5]
+  - Cloudflare R2: durable WebP cover storage.                    [step 5]
   - Supabase   : save the finished post.                       [step 6]
 
 The pipeline is deliberately split into chunks with pauses between them so
@@ -32,9 +33,11 @@ no provider sees a burst of back-to-back calls (avoids 429s):
                      as strict JSON (title / excerpt / content_html /
                      tags); same Gemini retry on 429/5xx.         [3s]
   5. Images        — Pixabay cover + up to three in-article photos,
-                     fetched ONE BY ONE with a 3s pause between each
-                     (Pollinations URL fallback per image). The URLs
-                     are embedded as <figure> tags and stored in
+                     fetched ONE BY ONE with a 3s pause between each.
+                     The cover is downloaded, cropped to 1200x630,
+                     compressed to WebP, and uploaded to Cloudflare R2
+                     (stable Unsplash URL on failure). In-article images
+                     keep their external CDN URLs and are stored in
                      blog_posts.content_images.
   6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
@@ -77,6 +80,7 @@ from app import ai_service
 from app.cache import clear_all as clear_read_caches
 from app.config import get_settings
 from app.plugins.seo_checker import evaluate_seo_lightweight
+from app.services.r2_storage import r2_storage
 
 # Every print() in this module goes to stdout, which `nohup ... > server.log`
 # captures. Non-tty stdout is BLOCK-buffered (8KB), so step logs sat in the
@@ -778,19 +782,53 @@ async def fetch_relevant_image(
     return UNSPLASH_FALLBACK_IMAGE
 
 
-def _pollinations_cover_url(title: str, keywords: list[str]) -> str:
-    """Pollinations.ai FALLBACK cover (keyless) when Pixabay is unavailable.
+MAX_COVER_DOWNLOAD_BYTES = 15 * 1024 * 1024
 
-    The prompt lives inside the URL, so the image is generated lazily the
-    first time the blog <img> is requested. Nothing is downloaded/uploaded.
+
+async def _persist_cover_image(url: str, slug: str) -> str:
+    """Download a cover, upload a compressed WebP to R2, return its public URL.
+
+    Pixabay ``/get/...`` URLs expire, so they must never be saved. Any
+    download/upload failure falls back to the stable Unsplash image.
     """
-    keyword = keywords[0] if keywords else title.split(":")[0]
-    prompt = f"{title[:140]}, {keyword}, cinematic, high quality, 8k resolution"
-    encoded = urllib.parse.quote(prompt, safe="")
-    return (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        "?width=1200&height=630&nologo=true"
-    )
+    if not url or url == UNSPLASH_FALLBACK_IMAGE:
+        return UNSPLASH_FALLBACK_IMAGE
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            content_type = (
+                response.headers.get("content-type", "")
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if not content_type.startswith("image/"):
+                raise ValueError(
+                    f"unexpected cover content type: {content_type or 'unknown'}"
+                )
+            image_bytes = response.content
+            if not image_bytes:
+                raise ValueError("cover download returned no bytes")
+            if len(image_bytes) > MAX_COVER_DOWNLOAD_BYTES:
+                raise ValueError("cover image exceeds the 15 MB limit")
+
+        permanent_url = await asyncio.to_thread(
+            r2_storage.compress_and_upload, image_bytes, slug
+        )
+        if not permanent_url:
+            raise RuntimeError("R2 upload returned an empty URL")
+        return permanent_url
+    except Exception as exc:  # noqa: BLE001 - never publish a dead cover
+        print(
+            f"[AutoBlog] cover R2 persistence failed "
+            f"({type(exc).__name__}: {exc}) - using Unsplash fallback.",
+            flush=True,
+        )
+        return UNSPLASH_FALLBACK_IMAGE
 
 
 _H2_RE = re.compile(r"(<h2[^>]*>.*?</h2>)", re.IGNORECASE | re.DOTALL)
@@ -808,9 +846,13 @@ def _pollinations_content_url(section_title: str, keyword: str) -> str:
 
 
 async def _cover_image_url(title: str, keywords: list[str]) -> str:
-    """Pixabay (title-first ladder); Pollinations URL only if the key is missing."""
-    url = await fetch_relevant_image(title, keywords, category="technology")
-    return url or _pollinations_cover_url(title, keywords)
+    """Fetch a cover and return only a durable R2 or Unsplash URL."""
+    candidate = await fetch_relevant_image(
+        title, keywords, category="technology"
+    )
+    if not candidate:
+        return UNSPLASH_FALLBACK_IMAGE
+    return await _persist_cover_image(candidate, slugify(title))
 
 
 async def _content_image_url(section_title: str, keyword: str) -> str:

@@ -161,36 +161,102 @@ class TestFetchRelevantImage(unittest.TestCase):
         self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
 
+def _fake_download_client(content=b"fake-image", content_type="image/jpeg"):
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.headers = {"content-type": content_type}
+    response.content = content
+    client = mock.MagicMock()
+    client.get = mock.AsyncMock(return_value=response)
+    cm = mock.MagicMock()
+    cm.__aenter__ = mock.AsyncMock(return_value=client)
+    cm.__aexit__ = mock.AsyncMock(return_value=False)
+    return client, cm
+
+
 class TestCoverImageUrl(unittest.TestCase):
-    def test_pixabay_hit_wins(self):
-        with mock.patch.object(
-            auto_blog,
-            "fetch_relevant_image",
-            mock.AsyncMock(return_value="https://cdn.pixabay.com/cover.jpg"),
+    def test_pixabay_hit_is_persisted_to_r2(self):
+        with (
+            mock.patch.object(
+                auto_blog,
+                "fetch_relevant_image",
+                mock.AsyncMock(
+                    return_value="https://pixabay.com/get/expiring-cover.jpg"
+                ),
+            ),
+            mock.patch.object(
+                auto_blog,
+                "_persist_cover_image",
+                mock.AsyncMock(
+                    return_value="https://cdn.example.com/covers/future-of-ai.webp"
+                ),
+            ) as persist,
         ):
             url = asyncio.run(
                 auto_blog._cover_image_url("Future of AI", ["ai education"])
             )
-        self.assertEqual(url, "https://cdn.pixabay.com/cover.jpg")
 
-    def test_falls_back_to_pollinations(self):
+        self.assertEqual(
+            url, "https://cdn.example.com/covers/future-of-ai.webp"
+        )
+        persist.assert_awaited_once_with(
+            "https://pixabay.com/get/expiring-cover.jpg", "future-of-ai"
+        )
+
+    def test_missing_candidate_returns_stable_unsplash(self):
         with mock.patch.object(
             auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
         ):
             url = asyncio.run(
                 auto_blog._cover_image_url("Future of AI", ["ai education"])
             )
-        self.assertTrue(url.startswith("https://image.pollinations.ai/prompt/"))
-        self.assertEqual(url.split("?", 1)[1], "width=1200&height=630&nologo=true")
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
-    def test_fallback_prompt_is_url_encoded(self):
-        with mock.patch.object(
-            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
+    def test_persist_downloads_and_uploads_cover(self):
+        _, cm = _fake_download_client()
+        storage = mock.Mock()
+        storage.compress_and_upload.return_value = (
+            "https://cdn.example.com/covers/ai_1234.webp"
+        )
+        with (
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+            mock.patch.object(auto_blog, "r2_storage", storage),
         ):
-            url = asyncio.run(auto_blog._cover_image_url("A, B & C?", []))
-        prompt = url.split("/prompt/", 1)[1].split("?", 1)[0]
-        self.assertNotIn(" ", prompt)
-        self.assertNotIn("&", prompt)
+            url = asyncio.run(
+                auto_blog._persist_cover_image(
+                    "https://pixabay.com/get/expiring.jpg", "ai"
+                )
+            )
+
+        self.assertEqual(url, "https://cdn.example.com/covers/ai_1234.webp")
+        storage.compress_and_upload.assert_called_once_with(b"fake-image", "ai")
+
+    def test_upload_failure_returns_stable_unsplash(self):
+        _, cm = _fake_download_client()
+        storage = mock.Mock()
+        storage.compress_and_upload.side_effect = RuntimeError("R2 down")
+        with (
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+            mock.patch.object(auto_blog, "r2_storage", storage),
+        ):
+            url = asyncio.run(
+                auto_blog._persist_cover_image(
+                    "https://pixabay.com/get/expiring.jpg", "ai"
+                )
+            )
+
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
+
+    def test_non_image_download_returns_stable_unsplash(self):
+        _, cm = _fake_download_client(content=b"<html>", content_type="text/html")
+        with mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm):
+            url = asyncio.run(
+                auto_blog._persist_cover_image(
+                    "https://pixabay.com/get/expiring.jpg", "ai"
+                )
+            )
+
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
 
 class TestContentImageHelpers(unittest.TestCase):
