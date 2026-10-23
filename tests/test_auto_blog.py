@@ -80,14 +80,100 @@ class TestFetchRelevantImage(unittest.TestCase):
             )
         self.assertEqual(url, "https://cdn.pixabay.com/photo/1-large.jpg")
         params = client.get.call_args.kwargs["params"]
-        self.assertEqual(params["q"], "AI Is Eating Software technology")
+        self.assertEqual(params["q"], "AI Is Eating Software")
         self.assertEqual(params["image_type"], "photo")
         self.assertEqual(params["orientation"], "horizontal")
         self.assertEqual(params["per_page"], 5)
         self.assertEqual(params["min_width"], 1200)
         self.assertEqual(params["order"], "popular")
-        # category is search text only — never an API param (invalid values 400).
+        # Tech queries send a valid Pixabay category, not "technology".
+        self.assertEqual(params["category"], "computer")
+
+    def test_model_name_is_first_query(self):
+        client, cm = _fake_pixabay_client(
+            [
+                {
+                    "tags": "ai, computer",
+                    "largeImageURL": "https://cdn.pixabay.com/gpt.jpg",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image(
+                    "OpenAI launches GPT-5.5 with new coding tools",
+                    ["gpt-5.5", "openai"],
+                )
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/gpt.jpg")
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["q"], "GPT-5.5 AI")
+        self.assertEqual(params["category"], "computer")
+
+    def test_fintech_query_uses_business_category(self):
+        client, cm = _fake_pixabay_client(
+            [
+                {
+                    "tags": "finance, technology",
+                    "largeImageURL": "https://cdn.pixabay.com/fintech.jpg",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            asyncio.run(
+                auto_blog.fetch_relevant_image(
+                    "AI fintech regulations update", ["fintech", "banking"]
+                )
+            )
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["category"], "business")
+
+    def test_non_tech_query_does_not_send_category(self):
+        client, cm = _fake_pixabay_client(
+            [
+                {
+                    "tags": "cake, food",
+                    "largeImageURL": "https://cdn.pixabay.com/cake.jpg",
+                }
+            ]
+        )
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            asyncio.run(
+                auto_blog.fetch_relevant_image(
+                    "Birthday Cake Decorating Tips", ["baking"]
+                )
+            )
+        params = client.get.call_args.kwargs["params"]
         self.assertNotIn("category", params)
+        self.assertEqual(params["q"], "Birthday Cake Decorating Tips")
+
+    def test_tech_tags_beat_generic_business_hits(self):
+        business = {
+            "tags": "business, office, meeting",
+            "largeImageURL": "https://cdn.pixabay.com/business.jpg",
+        }
+        coding = {
+            "tags": "coding, software, computer",
+            "largeImageURL": "https://cdn.pixabay.com/coding.jpg",
+        }
+        _, cm = _fake_pixabay_client([business, coding])
+        with (
+            mock.patch.object(auto_blog, "PIXABAY_API_KEY", "test-key"),
+            mock.patch.object(auto_blog.httpx, "AsyncClient", return_value=cm),
+        ):
+            url = asyncio.run(
+                auto_blog.fetch_relevant_image("AI agents for coding", ["coding"])
+            )
+        self.assertEqual(url, "https://cdn.pixabay.com/coding.jpg")
 
     def test_second_query_used_when_first_empty(self):
         client, cm = _client_with_responses(
@@ -159,6 +245,170 @@ class TestFetchRelevantImage(unittest.TestCase):
                 auto_blog.fetch_relevant_image("Totally Unknown Thing", ["zzz"])
             )
         self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
+
+
+class TestResearchAndDedupe(unittest.TestCase):
+    def test_queries_rotate_daily_and_use_current_month(self):
+        with (
+            mock.patch.object(auto_blog, "_day_index", return_value=1),
+            mock.patch.object(auto_blog, "_month_year", return_value="October 2026"),
+        ):
+            queries = auto_blog._ordered_research_queries()
+        self.assertEqual(queries[0][0], "industry_news")
+        self.assertEqual(queries[-1][0], "model_releases")
+        rendered = " ".join(query for _, query in queries)
+        self.assertIn("October 2026", rendered)
+
+    def test_tavily_uses_news_mode_and_official_domains(self):
+        client = mock.Mock()
+        client.search.return_value = {"results": []}
+        settings = mock.Mock(tavily_api_key="test-key")
+        with (
+            mock.patch.object(auto_blog, "get_settings", return_value=settings),
+            mock.patch.object(auto_blog, "TavilyClient", return_value=client),
+        ):
+            auto_blog._tavily_search("latest AI news")
+        kwargs = client.search.call_args.kwargs
+        self.assertEqual(kwargs["topic"], "news")
+        self.assertEqual(kwargs["days"], 3)
+        self.assertEqual(kwargs["search_depth"], "advanced")
+        self.assertEqual(kwargs["max_results"], 10)
+        self.assertIn("openai.com", kwargs["include_domains"])
+        self.assertNotIn(
+            "techcrunch.com/category/artificial-intelligence",
+            kwargs["include_domains"],
+        )
+
+    def test_similarity_flags_repeated_angles(self):
+        score = auto_blog._topic_similarity(
+            "GPT-5.5 launch brings coding upgrades",
+            "GPT-5.5 release adds new coding upgrades",
+        )
+        self.assertGreater(score, auto_blog.SIMILARITY_THRESHOLD)
+        different = auto_blog._topic_similarity(
+            "AI tutoring tools for students",
+            "AI fintech regulations update",
+        )
+        self.assertLessEqual(different, auto_blog.SIMILARITY_THRESHOLD)
+
+    def test_find_duplicate_checks_keywords_too(self):
+        score, match = auto_blog._find_duplicate(
+            "Anthropic IPO",
+            [{"title": "A different headline", "keywords": ["anthropic ipo"]}],
+        )
+        self.assertGreater(score, auto_blog.SIMILARITY_THRESHOLD)
+        self.assertEqual(match, "anthropic ipo")
+
+    def test_retry_rejects_duplicate_then_accepts_new_topic(self):
+        results = [
+            {
+                "title": "GPT-5.5 release",
+                "url": "https://openai.com/index/gpt-5-5",
+                "content": "OpenAI released GPT-5.5.",
+                "published_date": "2026-10-23",
+            }
+        ]
+        recent = [{"title": "GPT-5.5 Released by OpenAI", "keywords": ["gpt-5.5"]}]
+        ordered = [
+            ("model_releases", "q1"),
+            ("industry_news", "q2"),
+            ("research", "q3"),
+            ("education", "q4"),
+            ("fintech", "q5"),
+        ]
+        topic_mock = mock.AsyncMock(
+            side_effect=[
+                "GPT-5.5 Released by OpenAI",
+                "AI tutoring tools for students",
+            ]
+        )
+        with (
+            mock.patch.object(auto_blog, "_ordered_research_queries", return_value=ordered),
+            mock.patch.object(auto_blog, "_research_chunk", mock.AsyncMock(return_value=results)),
+            mock.patch.object(auto_blog, "_topic_chunk", topic_mock),
+        ):
+            research, selected = asyncio.run(
+                auto_blog._research_and_select_topic(recent)
+            )
+        self.assertEqual(research.topic, "AI tutoring tools for students")
+        self.assertEqual(selected, results)
+        self.assertEqual(topic_mock.await_count, 2)
+        self.assertEqual(topic_mock.await_args_list[0].kwargs["category"], "model_releases")
+        self.assertEqual(topic_mock.await_args_list[1].kwargs["category"], "industry_news")
+
+    def test_forces_unused_category_after_two_retries(self):
+        results = [
+            {
+                "title": "GPT-5.5 release",
+                "url": "https://openai.com/index/gpt-5-5",
+                "content": "OpenAI released GPT-5.5.",
+                "published_date": "2026-10-23",
+            }
+        ]
+        recent = [{"title": "GPT-5.5 Released by OpenAI", "keywords": ["gpt-5.5"]}]
+        ordered = [
+            ("model_releases", "q1"),
+            ("industry_news", "q2"),
+            ("research", "q3"),
+            ("education", "q4"),
+            ("fintech", "q5"),
+        ]
+        topic_mock = mock.AsyncMock(
+            side_effect=[
+                "GPT-5.5 Released by OpenAI",
+                "GPT-5.5 Released by OpenAI",
+                "GPT-5.5 Released by OpenAI",
+                "AI tutoring tools for students",
+            ]
+        )
+        with (
+            mock.patch.object(auto_blog, "_ordered_research_queries", return_value=ordered),
+            mock.patch.object(auto_blog, "_research_chunk", mock.AsyncMock(return_value=results)),
+            mock.patch.object(auto_blog, "_topic_chunk", topic_mock),
+        ):
+            research, _ = asyncio.run(
+                auto_blog._research_and_select_topic(recent)
+            )
+        self.assertEqual(research.topic, "AI tutoring tools for students")
+        self.assertEqual(topic_mock.await_count, 4)
+        self.assertEqual(topic_mock.await_args_list[-1].kwargs["category"], "education")
+
+    def test_fetch_recent_posts_queries_latest_ten(self):
+        table = mock.Mock()
+        query = table.select.return_value.order.return_value.limit.return_value
+        query.execute.return_value = mock.Mock(
+            data=[{"title": "Recent post", "keywords": ["ai"], "published_at": "x"}]
+        )
+        client = mock.Mock()
+        client.table.return_value = table
+        with mock.patch.object(auto_blog, "_supabase", return_value=client):
+            rows = auto_blog._fetch_recent_posts(7)
+        self.assertEqual(rows[0]["title"], "Recent post")
+        table.select.assert_called_once_with("title, keywords, published_at")
+        table.select.return_value.order.assert_called_once_with(
+            "published_at", desc=True
+        )
+        table.select.return_value.order.return_value.limit.assert_called_once_with(7)
+
+    def test_fetch_recent_posts_failure_is_non_fatal(self):
+        with mock.patch.object(
+            auto_blog, "_supabase", side_effect=RuntimeError("db down")
+        ):
+            self.assertEqual(auto_blog._fetch_recent_posts(), [])
+
+    def test_blocked_topics_include_titles_and_keywords(self):
+        blocked = auto_blog._blocked_topics(
+            [
+                {
+                    "title": "GPT-5.5 Released by OpenAI",
+                    "keywords": ["gpt-5.5", "openai", "ai"],
+                }
+            ]
+        )
+        self.assertEqual(
+            blocked,
+            ["GPT-5.5 Released by OpenAI", "gpt-5.5", "openai"],
+        )
 
 
 def _fake_download_client(content=b"fake-image", content_type="image/jpeg"):
@@ -260,10 +510,14 @@ class TestCoverImageUrl(unittest.TestCase):
 
 
 class TestContentImageHelpers(unittest.TestCase):
-    def test_content_image_url_format(self):
-        url = auto_blog._pollinations_content_url("Focus techniques", "deep work")
-        self.assertTrue(url.startswith("https://image.pollinations.ai/prompt/"))
-        self.assertEqual(url.split("?", 1)[1], "width=800&height=450&nologo=true")
+    def test_missing_pixabay_key_uses_unsplash_fallback(self):
+        with mock.patch.object(
+            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
+        ):
+            url = asyncio.run(
+                auto_blog._content_image_url("Focus techniques", "deep work")
+            )
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
     def test_pixabay_hit_wins(self):
         with mock.patch.object(
@@ -320,15 +574,15 @@ class TestImagesChunk(unittest.TestCase):
         self.assertEqual(images[0]["url"], "https://cdn.pixabay.com/x.jpg")
         self.assertIn('src="https://cdn.pixabay.com/x.jpg"', out)
 
-    def test_falls_back_to_pollinations_per_image(self):
+    def test_falls_back_to_unsplash_per_image(self):
         html_in = (
             "<h2>Section One</h2><p>Body one.</p>"
             "<h2>Section Two</h2><p>Body two.</p>"
         )
         out, images = _run_images_chunk(html_in, ["ai"], image_url=None)
         self.assertEqual(len(images), 2)
-        self.assertIn("width=800&height=450&nologo=true", out)
-        self.assertIn("Section%20One", images[0]["url"])
+        self.assertEqual(images[0]["url"], auto_blog.UNSPLASH_FALLBACK_IMAGE)
+        self.assertIn(auto_blog.UNSPLASH_FALLBACK_IMAGE, out)
 
     def test_no_h2_appends_single_image(self):
         html_in = "<p>First para.</p><p>Second para.</p>"
@@ -356,8 +610,22 @@ class TestImagesChunk(unittest.TestCase):
 
 class TestPipelineGraceful(unittest.TestCase):
     def test_run_pipeline_returns_none_without_keys(self):
-        """No GOOGLE/TAVILY keys → stage error is logged, None returned."""
-        result = asyncio.run(auto_blog.run_pipeline())
+        """Stage errors are logged, the lock is released, and None is returned."""
+        with (
+            mock.patch.object(auto_blog, "RESEARCH_PAUSE_SECONDS", 0),
+            mock.patch.object(auto_blog, "_fetch_recent_posts", return_value=[]),
+            mock.patch.object(
+                auto_blog,
+                "_research_and_select_topic",
+                side_effect=RuntimeError("test: research unavailable"),
+            ),
+            mock.patch.object(
+                auto_blog,
+                "_keyword_chunk",
+                side_effect=RuntimeError("test: keywords unavailable"),
+            ),
+        ):
+            result = asyncio.run(auto_blog.run_pipeline())
         self.assertIsNone(result)
         self.assertTrue(auto_blog._RUN_LOCK.acquire(blocking=False))
         auto_blog._RUN_LOCK.release()

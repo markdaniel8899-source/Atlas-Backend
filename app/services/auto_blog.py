@@ -22,8 +22,9 @@ HYBRID MODEL ROUTING — every provider does what it is best at:
 The pipeline is deliberately split into chunks with pauses between them so
 no provider sees a burst of back-to-back calls (avoids 429s):
 
-  1. Research      — Tavily search in the "AI & Technology" niche, then
-                     Nemotron Ultra picks ONE trending topic.     [2s]
+  1. Research      — Tavily news search across rotating AI queries, then
+                     Nemotron Ultra picks ONE fresh trending topic while
+                     avoiding the last 10 published posts.         [2s]
   2. Keywords      — Nemotron Ultra distills the top 3-5 SEO
                      keywords for the topic (heuristic fallback). [2s]
   3. Meta          — Groq writes the catchy meta title + meta
@@ -57,13 +58,14 @@ an `async def` on the event loop — `time.sleep` would block all requests).
 from __future__ import annotations
 
 import asyncio
+import difflib
 import html
 import os
 import re
 import sys
 import threading
-import uuid
 import urllib.parse
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -124,8 +126,52 @@ RESEARCH_PAUSE_SECONDS = 2  # after topic (step 1) and keywords (step 2)
 WRITE_PAUSE_SECONDS = 3  # after meta (step 3) and article (step 4)
 IMAGE_PAUSE_SECONDS = 3  # between in-article image generations
 
-# Single niche for the daily research query.
-NICHE = "AI & Technology"
+# Rotating research categories. The day index picks the starting point so each
+# daily run leads with a different category instead of the same static query.
+RESEARCH_QUERIES: tuple[tuple[str, str], ...] = (
+    ("model_releases", "latest AI model releases {month_year}"),
+    ("industry_news", "OpenAI Anthropic Google AI announcements this week"),
+    ("research", "AI research papers arXiv {month_year}"),
+    ("education", "AI in education technology news"),
+    ("fintech", "AI fintech regulations updates"),
+)
+
+# Tavily news mode: keep the window short so the blog is actually current.
+RESEARCH_DAYS = 3
+RESEARCH_MAX_RESULTS = 10
+RESEARCH_SEARCH_DEPTH = "advanced"
+
+# Root domains only: Tavily include_domains does not accept URL paths.
+OFFICIAL_SOURCE_DOMAINS: tuple[str, ...] = (
+    "openai.com",
+    "anthropic.com",
+    "ai.google",
+    "deepmind.com",
+    "huggingface.co",
+    "arxiv.org",
+    "techcrunch.com",
+    "mit.edu",
+    "stanford.edu",
+)
+
+# Deduplicate against the most recent published posts.
+RECENT_POSTS_LIMIT = 10
+SIMILARITY_THRESHOLD = 0.70
+TOPIC_RETRY_LIMIT = 2
+
+# Generic terms are useless as "avoid" instructions and can accidentally
+# forbid the whole AI niche.
+_BLOCKED_TOPIC_JUNK = frozenset(
+    {
+        "ai",
+        "artificial intelligence",
+        "technology",
+        "tech",
+        "news",
+        "update",
+        "updates",
+    }
+)
 
 # Used when Tavily is down/unconfigured; one per UTC day.
 FALLBACK_TOPICS = (
@@ -176,7 +222,9 @@ From the research snippets, pick ONE specific, currently trending, searchable bl
 Return ONLY strict JSON (no fences, no commentary):
 {"topic": "..."}
 
-- topic: a concrete angle a reader would click, max 120 chars."""
+- topic: a concrete angle a reader would click, max 120 chars.
+- Prefer a specific model, company, research paper, or measurable news event over generic advice.
+- Never repeat an angle from the recently published posts supplied in the prompt."""
 
 _KEYWORD_SYSTEM = """You are an SEO content strategist for ATLAS, a learning OS for students.
 Extract the top 3 to 5 SEO keywords for the given blog topic.
@@ -457,18 +505,54 @@ async def _generate(
 # ───────────────────────────── Stage 1 · Research ─────────────────────────────
 
 
-def _tavily_search(query: str) -> list[dict[str, Any]]:
+def _month_year() -> str:
+    """Current UTC month/year, e.g. 'October 2026'."""
+    return _utc().strftime("%B %Y")
+
+
+def _ordered_research_queries() -> list[tuple[str, str]]:
+    """Render the query pool and rotate its starting point each UTC day."""
+    month_year = _month_year()
+    queries = [
+        (category, template.format(month_year=month_year))
+        for category, template in RESEARCH_QUERIES
+    ]
+    offset = _day_index() % len(queries)
+    return queries[offset:] + queries[:offset]
+
+
+def _result_host(url: str) -> str:
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _domain_rank(url: str) -> int:
+    """Lower is better. Unknown domains sort after the official sources."""
+    host = _result_host(url)
+    for index, domain in enumerate(OFFICIAL_SOURCE_DOMAINS):
+        if host == domain or host.endswith(f".{domain}"):
+            return index
+    return len(OFFICIAL_SOURCE_DOMAINS)
+
+
+def _tavily_search(
+    query: str, include_domains: tuple[str, ...] | None = OFFICIAL_SOURCE_DOMAINS
+) -> list[dict[str, Any]]:
     """Sync Tavily call — executed in a worker thread via asyncio.to_thread."""
     settings = get_settings()
     if not settings.tavily_api_key:
         raise BlogPipelineError("TAVILY_API_KEY is not configured.", status_code=503)
     client = TavilyClient(api_key=settings.tavily_api_key)
-    response = client.search(
-        query=query,
-        topic="general",
-        search_depth="basic",
-        max_results=MAX_RESULTS,
-    )
+    args: dict[str, Any] = {
+        "query": query,
+        "topic": "news",
+        "days": RESEARCH_DAYS,
+        "search_depth": RESEARCH_SEARCH_DEPTH,
+        "max_results": RESEARCH_MAX_RESULTS,
+    }
+    if include_domains:
+        args["include_domains"] = list(include_domains)
+    response = client.search(**args)
     results = response.get("results") if isinstance(response, dict) else None
     return results if isinstance(results, list) else []
 
@@ -478,19 +562,181 @@ def _clean_result(item: dict[str, Any]) -> dict[str, str]:
         "title": str(item.get("title") or "").strip(),
         "url": str(item.get("url") or "").strip(),
         "content": str(item.get("content") or "").strip(),
+        "published_date": str(item.get("published_date") or "").strip(),
     }
 
 
-async def _research_chunk() -> list[dict[str, str]]:
-    """Step 1/6 (part A): Tavily trending-topic search (raises on failure)."""
-    query = f"{NICHE} {_utc().year} trending"
-    raw = await asyncio.to_thread(_tavily_search, query)
+def _result_line(result: dict[str, str]) -> str:
+    published = (
+        f" [{result['published_date']}]" if result.get("published_date") else ""
+    )
+    return (
+        f"- {result['title']}{published} ({result['url']}): "
+        f"{result['content'][:500]}"
+    )
+
+
+def _research_snippets(results: list[dict[str, str]]) -> list[str]:
     return [
-        r for r in (_clean_result(item) for item in raw) if r["title"] or r["content"]
+        f"{result['title']} ({result['url']}): {result['content'][:500]}"
+        for result in results
+        if result.get("title") or result.get("content")
     ]
 
 
-async def _topic_chunk(results: list[dict[str, str]]) -> str:
+def _dedupe_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    cleaned: list[dict[str, str]] = []
+    for result in results:
+        key = result.get("url") or result.get("title", "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(result)
+    cleaned.sort(key=lambda result: _domain_rank(result.get("url", "")))
+    return cleaned
+
+
+async def _research_chunk(query: str) -> list[dict[str, str]]:
+    """Step 1/6 (part A): Tavily news search (raises on failure).
+
+    Official domains are searched first. If that filtered search returns
+    nothing, one unrestricted news search keeps the pipeline alive.
+    """
+    try:
+        raw = await asyncio.to_thread(_tavily_search, query)
+    except Exception as exc:  # noqa: BLE001 - unrestricted retry below
+        print(
+            f"[AutoBlog] official-domain search failed for {query!r} "
+            f"({type(exc).__name__}: {exc}) — retrying unrestricted.",
+            flush=True,
+        )
+        raw = await asyncio.to_thread(_tavily_search, query, None)
+
+    results = _dedupe_results(
+        [
+            cleaned
+            for cleaned in (_clean_result(item) for item in raw)
+            if cleaned["title"] or cleaned["content"]
+        ]
+    )
+    if results:
+        return results
+
+    raw = await asyncio.to_thread(_tavily_search, query, None)
+    return _dedupe_results(
+        [
+            cleaned
+            for cleaned in (_clean_result(item) for item in raw)
+            if cleaned["title"] or cleaned["content"]
+        ]
+    )
+
+
+def _fetch_recent_posts(limit: int = RECENT_POSTS_LIMIT) -> list[dict[str, Any]]:
+    """Fetch the latest published posts for topic deduplication (never raises)."""
+    try:
+        response = (
+            _supabase()
+            .table("blog_posts")
+            .select("title, keywords, published_at")
+            .order("published_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = getattr(response, "data", None)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    except Exception as exc:  # noqa: BLE001 - dedupe is best-effort
+        print(
+            f"[AutoBlog] recent-post lookup failed "
+            f"({type(exc).__name__}: {exc}) — dedupe disabled for this run.",
+            flush=True,
+        )
+    return []
+
+
+def _blocked_topics(recent_posts: list[dict[str, Any]]) -> list[str]:
+    """Flatten recent titles + keywords into a prompt-safe avoid list."""
+    blocked: list[str] = []
+    seen: set[str] = set()
+    for post in recent_posts:
+        values: list[Any] = [post.get("title")]
+        keywords = post.get("keywords")
+        if isinstance(keywords, list):
+            values.extend(keywords)
+        for value in values:
+            text = str(value or "").strip()
+            key = text.lower()
+            if text and key not in seen and key not in _BLOCKED_TOPIC_JUNK:
+                seen.add(key)
+                blocked.append(text[:160])
+    return blocked[:30]
+
+
+def _topic_text(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+
+
+def _topic_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in _topic_text(value).split()
+        if token not in _STOPWORDS and len(token) > 1
+    }
+
+
+def _topic_sequence_similarity(first: str, second: str) -> float:
+    first_text, second_text = _topic_text(first), _topic_text(second)
+    if not first_text or not second_text:
+        return 0.0
+    return difflib.SequenceMatcher(None, first_text, second_text).ratio()
+
+
+def _topic_similarity(first: str, second: str) -> float:
+    """Blend sequence similarity with token overlap (0.0-1.0)."""
+    sequence = _topic_sequence_similarity(first, second)
+    first_tokens, second_tokens = _topic_tokens(first), _topic_tokens(second)
+    if not first_tokens or not second_tokens:
+        return sequence
+    overlap = len(first_tokens & second_tokens)
+    jaccard = overlap / len(first_tokens | second_tokens)
+    containment = overlap / min(len(first_tokens), len(second_tokens))
+    return max(sequence, jaccard, containment)
+
+
+def _find_duplicate(
+    topic: str, recent_posts: list[dict[str, Any]]
+) -> tuple[float, str]:
+    """Compare against recent titles and keywords, returning the best match."""
+    best_score = 0.0
+    best_title = ""
+    for post in recent_posts:
+        title = str(post.get("title") or "").strip()
+        if title:
+            score = _topic_similarity(topic, title)
+            if score > best_score:
+                best_score, best_title = score, title
+        keywords = post.get("keywords")
+        if not isinstance(keywords, list):
+            continue
+        for keyword in keywords:
+            text = str(keyword or "").strip()
+            if not text or text.lower() in _BLOCKED_TOPIC_JUNK:
+                continue
+            # Sequence-only for short keywords: exact phrase matches still
+            # reject, but a shared model name alone does not over-block.
+            score = _topic_sequence_similarity(topic, text)
+            if score > best_score:
+                best_score, best_title = score, text
+    return best_score, best_title
+
+
+async def _topic_chunk(
+    results: list[dict[str, str]],
+    blocked_topics: list[str] | None = None,
+    category: str | None = None,
+) -> str:
     """Step 1/6 (part B): Nemotron Ultra picks the day's trending topic.
 
     Falls back to a curated daily topic when Tavily returned nothing, and to
@@ -501,14 +747,21 @@ async def _topic_chunk(results: list[dict[str, str]]) -> str:
         print(f"[AutoBlog] research fallback -> topic={topic!r}")
         return topic
 
-    blob = "\n".join(
-        f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
-    )
+    blob = "\n".join(_result_line(result) for result in results)
+    system = _TOPIC_SYSTEM
+    if blocked_topics:
+        avoid = "\n".join(f"- {topic[:160]}" for topic in blocked_topics[:20])
+        system += (
+            "\n\nRECENTLY PUBLISHED (strictly avoid these angles):\n"
+            f"{avoid}\n"
+            "Choose a clearly different story, model, company, or event."
+        )
+    category_line = f"Preferred category: {category}\n" if category else ""
     try:
         text = await asyncio.to_thread(
             _nim_chat,
-            _TOPIC_SYSTEM,
-            f"Today's research:\n{blob}",
+            system,
+            f"{category_line}Today's research:\n{blob}",
             temperature=0.3,
             max_tokens=2048,
         )
@@ -523,16 +776,90 @@ async def _topic_chunk(results: list[dict[str, str]]) -> str:
     return headline or FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
 
 
+async def _research_and_select_topic(
+    recent_posts: list[dict[str, Any]],
+) -> tuple[Research, list[dict[str, str]]]:
+    """Research, generate a topic, reject repeats, then force a new category."""
+    queries = _ordered_research_queries()
+    blocked = _blocked_topics(recent_posts)
+    attempted: list[str] = []
+    results: list[dict[str, str]] = []
+    topic = ""
+
+    for attempt in range(TOPIC_RETRY_LIMIT + 1):
+        category, query = queries[attempt % len(queries)]
+        print(
+            f"[AutoBlog] research attempt {attempt + 1}/"
+            f"{TOPIC_RETRY_LIMIT + 1}: {category} -> {query!r}",
+            flush=True,
+        )
+        results = await _research_chunk(query)
+        topic = await _topic_chunk(
+            results, [*blocked, *attempted], category=category
+        )
+        score, match = _find_duplicate(topic, recent_posts)
+        print(
+            f"[AutoBlog] candidate topic={topic!r} similarity={score:.2f}"
+            + (f" match={match!r}" if match else ""),
+            flush=True,
+        )
+        if score <= SIMILARITY_THRESHOLD:
+            return (
+                Research(
+                    topic=topic,
+                    keywords=[],
+                    snippets=_research_snippets(results),
+                ),
+                results,
+            )
+        attempted.append(topic)
+        print(
+            f"[AutoBlog] duplicate topic rejected ({score:.0%} similar) — retrying.",
+            flush=True,
+        )
+
+    used_categories = {category for category, _ in queries[: TOPIC_RETRY_LIMIT + 1]}
+    forced_category, forced_query = next(
+        (
+            (category, query)
+            for category, query in queries
+            if category not in used_categories
+        ),
+        queries[-1],
+    )
+    print(
+        f"[AutoBlog] forcing a different category: {forced_category} -> "
+        f"{forced_query!r}",
+        flush=True,
+    )
+    results = await _research_chunk(forced_query)
+    topic = await _topic_chunk(
+        results, [*blocked, *attempted], category=forced_category
+    )
+    score, match = _find_duplicate(topic, recent_posts)
+    if score > SIMILARITY_THRESHOLD:
+        print(
+            f"[AutoBlog] forced topic still {score:.0%} similar to {match!r}; "
+            "accepting it to avoid an empty run.",
+            flush=True,
+        )
+    return (
+        Research(
+            topic=topic,
+            keywords=[],
+            snippets=_research_snippets(results),
+        ),
+        results,
+    )
+
+
 async def _keyword_chunk(topic: str, results: list[dict[str, str]]) -> list[str]:
     """Step 2/6: Nemotron Ultra extracts the top 3-5 SEO keywords.
 
     Heuristic padding (_pad_keywords) keeps the list usable when NIM fails.
     """
-    blob = (
-        "\n".join(
-            f"- {r['title']} ({r['url']}): {r['content'][:500]}" for r in results
-        )
-        or "(no research snippets)"
+    blob = "\n".join(_result_line(result) for result in results) or (
+        "(no research snippets)"
     )
     try:
         text = await asyncio.to_thread(
@@ -660,45 +987,163 @@ async def _write_article(
 # ─────────────── Stage 3 · Cover + in-article images (Pixabay first) ─────────
 
 # Final fallback when Pixabay has nothing for ANY query in the ladder —
-# the well-known Unsplash "AI / abstract tech" photo.
+# a stable Unsplash "AI / abstract tech" photo (not generic business stock).
+UNSPLASH_FALLBACK_IMAGE = (
+    "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1200"
+)
+
 PIXABAY_UNSWORTHY_HITS = frozenset(
     {
         "cake", "food", "eat", "eating", "eaten", "dinner", "lunch", "breakfast",
         "restaurant", "meal", "cookie", "candy", "sugar", "bakery", "dessert",
     }
 )
+
 # When the search query contains any of these, food-tagged Pixabay hits are
 # decoys (e.g. "AI Is Eating Software" must not return a cake photo).
 _TECH_CONTEXT_WORDS = frozenset(
     {
         "ai", "artificial", "intelligence", "software", "technology",
-        "technologies", "computer", "digital", "data", "robot", "algorithm",
-        "code", "coding", "developer", "programming", "tech", "machine",
-        "learning", "cloud", "cyber", "startup", "internet", "device",
-        "hardware", "assistant", "agents",
+        "technologies", "computer", "digital", "data", "robot", "robotics",
+        "algorithm", "code", "coding", "developer", "programming", "tech",
+        "machine", "cloud", "cyber", "startup", "internet", "device",
+        "hardware", "assistant", "agents", "automation", "llm", "gpu",
+        "chip", "openai", "anthropic", "google", "deepmind", "huggingface",
+        "arxiv", "gpt", "chatgpt", "claude", "gemini", "llama", "mistral",
+        "deepseek", "qwen", "kimi", "grok", "copilot", "fintech",
     }
 )
-UNSPLASH_FALLBACK_IMAGE = (
-    "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1200"
+
+_TECH_IMAGE_TAGS = frozenset(
+    {
+        "ai", "artificial", "intelligence", "technology", "computer", "software",
+        "code", "coding", "programming", "developer", "robot", "robotics",
+        "machine", "data", "cyber", "digital", "algorithm", "startup",
+        "internet", "electronics", "hardware", "science", "engineering",
+    }
 )
+
+_GENERIC_BUSINESS_TAGS = frozenset(
+    {
+        "business", "office", "meeting", "handshake", "corporate", "finance",
+        "money", "chart", "graph", "team", "manager", "suit", "desk",
+    }
+)
+
+# Specific AI model names make much better image queries than "AI technology".
+_AI_MODEL_RE = re.compile(
+    r"\b(?:"
+    r"GPT[-\s]?(?:4o|4\.\d+|\d+(?:\.\d+)?)|"
+    r"ChatGPT|"
+    r"Claude(?:\s+\d+(?:\.\d+)?)?|"
+    r"Gemini(?:\s+\d+(?:\.\d+)?)?|"
+    r"Llama(?:\s+\d+(?:\.\d+)?)?|"
+    r"Mistral(?:\s+\w+)?|"
+    r"DeepSeek(?:[-\s]?\w+)?|"
+    r"Qwen(?:\d+(?:\.\d+)?)?|"
+    r"Kimi(?:\s+K\d+(?:\.\d+)?)?|"
+    r"Grok(?:\s+\d+(?:\.\d+)?)?|"
+    r"Copilot"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_PIXABAY_CATEGORY_HINTS: tuple[tuple[str, str], ...] = (
+    ("fintech", "business"),
+    ("banking", "business"),
+    ("payment", "business"),
+    ("education", "education"),
+    ("student", "education"),
+    ("school", "education"),
+    ("classroom", "education"),
+    ("teacher", "education"),
+    ("research", "science"),
+    ("arxiv", "science"),
+    ("paper", "science"),
+    ("study", "science"),
+)
+
+
+def _query_is_techy(text: str) -> bool:
+    return bool(set(re.findall(r"[a-z]+", text.lower())) & _TECH_CONTEXT_WORDS)
+
+
+def _extract_ai_models(text: str) -> list[str]:
+    models: list[str] = []
+    seen: set[str] = set()
+    for match in _AI_MODEL_RE.finditer(text):
+        model = " ".join(match.group(0).split())
+        key = model.lower()
+        if key not in seen:
+            seen.add(key)
+            models.append(model)
+    return models[:3]
+
+
+def _append_ai(term: str, search_is_techy: bool) -> str:
+    if not search_is_techy or re.search(r"\bai\b", term, re.IGNORECASE):
+        return term
+    return f"{term} AI"
+
+
+def _image_queries(
+    title: str, keywords: list[str], category: str | None
+) -> list[str]:
+    text = f"{title} {' '.join(keywords)}"
+    search_is_techy = _query_is_techy(text)
+    models = _extract_ai_models(text)
+    main_topic = " ".join((title or "").split()[:6]).strip()
+    candidates = [
+        f"{' '.join(models)} AI" if models else "",
+        _append_ai(main_topic, search_is_techy) if main_topic else "",
+        _append_ai(" ".join(keywords[:3]), search_is_techy) if keywords else "",
+        f"{category} AI" if category else "",
+        main_topic,
+    ]
+    queries: list[str] = []
+    seen: set[str] = set()
+    for query in candidates:
+        clean = query.strip()
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            queries.append(clean)
+    return queries
+
+
+def _pixabay_category(title: str, keywords: list[str]) -> str:
+    text = f"{title} {' '.join(keywords)}".lower()
+    for hint, category in _PIXABAY_CATEGORY_HINTS:
+        if hint in text:
+            return category
+    return "computer"
 
 
 def _pick_hit(hits: list[dict], query: str) -> str:
-    """Pick the best hit: skip food-matched decoys on tech-context queries.
+    """Pick the best hit: skip food decoys and prefer tech/coding imagery.
 
     Literal title words (e.g. "AI Is Eating Software") otherwise surface
-    cake/food photos — the exact failure users reported. A genuinely foody
-    query (no tech words) still gets food photos normally.
+    cake/food photos. On tech queries, hits tagged with coding/robotics/science
+    outrank generic business/office stock, while the API order breaks ties.
     """
-    query_tokens = set(re.findall(r"[a-z]+", query.lower()))
-    query_is_techy = bool(query_tokens & _TECH_CONTEXT_WORDS)
-    for hit in hits:
-        tags = str(hit.get("tags") or "").lower()
-        if query_is_techy and any(w in tags for w in PIXABAY_UNSWORTHY_HITS):
+    query_is_techy = _query_is_techy(query)
+    ranked: list[tuple[int, int, dict]] = []
+    for index, hit in enumerate(hits):
+        tag_words = set(re.findall(r"[a-z]+", str(hit.get("tags") or "").lower()))
+        if query_is_techy and tag_words & PIXABAY_UNSWORTHY_HITS:
             continue
+        score = 0
+        if query_is_techy:
+            score += 2 * len(tag_words & _TECH_IMAGE_TAGS)
+            score -= 2 * len(tag_words & _GENERIC_BUSINESS_TAGS)
+        ranked.append((score, -index, hit))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _, _, hit in ranked:
         url = str(hit.get("largeImageURL") or "").strip()
         if url:
             return url
+
     # Every hit was filtered out — take the first usable URL anyway.
     for hit in hits:
         url = str(hit.get("largeImageURL") or "").strip()
@@ -710,55 +1155,47 @@ def _pick_hit(hits: list[dict], query: str) -> str:
 async def fetch_relevant_image(
     title: str, keywords: list[str] | None = None, category: str | None = None
 ) -> str | None:
-    """Fetch a relevant photo from Pixabay using title-first search terms.
+    """Fetch a relevant photo from Pixabay using specific news/model terms.
 
     Query ladder (first query with hits wins):
-      1. first 3-4 words of the title + " technology"  (most specific)
-      2. first 2 article keywords
-      3. "<category> professional"
-      4. the bare title topic
+      1. detected AI model name(s) + " AI"
+      2. first 6 words of the title (+ " AI" when absent)
+      3. first 3 article keywords (+ " AI" when absent)
+      4. "<category> AI"
+      5. the bare title topic
 
-    NOTE: `category` is only used as SEARCH TEXT. Pixabay's API `category`
-    param accepts a single value like "computer"/"business" (no "technology";
-    invalid values → HTTP 400), so it is never sent as an API param.
-
-    Returns the largeImageURL of the most relevant hit (Pixabay auto-serves
-    WebP, so only the URL is stored), the Unsplash fallback when the whole
-    ladder finds nothing, or None when there is no API key (the caller then
-    falls back to a Pollinations URL).
+    Tech queries also send a valid Pixabay category (computer/science/
+    education/business) and rank coding/robotics tags above generic business
+    stock. Returns the largeImageURL, the stable Unsplash tech fallback when
+    nothing relevant is found, or None when there is no API key (the caller
+    then uses the same Unsplash fallback).
     """
     if not PIXABAY_API_KEY:
         return None
 
-    main_topic = " ".join((title or "").split()[:4]).strip()
-    kw = [k for k in (keywords or []) if k]
-    queries = [
-        f"{main_topic} technology" if main_topic else None,
-        " ".join(kw[:2]) if kw else None,
-        f"{category} professional" if category else None,
-        main_topic or None,
-    ]
+    kw = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    queries = _image_queries(title, kw, category)
+    query_is_techy = _query_is_techy(f"{title} {' '.join(kw)}")
+    pixabay_category = _pixabay_category(title, kw) if query_is_techy else None
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for query in queries:
-            if not query:
-                continue
+            params: dict[str, Any] = {
+                "key": PIXABAY_API_KEY,
+                "q": query[:100],
+                "image_type": "photo",
+                "orientation": "horizontal",
+                "safesearch": "true",
+                "min_width": 1200,
+                "min_height": 800,
+                "order": "popular",
+                # Valid range is 3-200; we pick the best of the 5.
+                "per_page": 5,
+            }
+            if pixabay_category:
+                params["category"] = pixabay_category
             try:
-                response = await client.get(
-                    "https://pixabay.com/api/",
-                    params={
-                        "key": PIXABAY_API_KEY,
-                        "q": query[:100],
-                        "image_type": "photo",
-                        "orientation": "horizontal",
-                        "safesearch": "true",
-                        "min_width": 1200,
-                        "min_height": 800,
-                        "order": "popular",
-                        # Valid range is 3-200; we pick the best of the 5.
-                        "per_page": 5,
-                    },
-                )
+                response = await client.get("https://pixabay.com/api/", params=params)
                 response.raise_for_status()
                 data = response.json()
             except Exception as exc:  # noqa: BLE001 - try the next query
@@ -835,16 +1272,6 @@ _H2_RE = re.compile(r"(<h2[^>]*>.*?</h2>)", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _pollinations_content_url(section_title: str, keyword: str) -> str:
-    """Pollinations.ai FALLBACK in-article image when Pixabay is unavailable."""
-    prompt = f"{section_title[:120]}, {keyword}, cinematic, high quality"
-    encoded = urllib.parse.quote(prompt, safe="")
-    return (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        "?width=800&height=450&nologo=true"
-    )
-
-
 async def _cover_image_url(title: str, keywords: list[str]) -> str:
     """Fetch a cover and return only a durable R2 or Unsplash URL."""
     candidate = await fetch_relevant_image(
@@ -856,11 +1283,11 @@ async def _cover_image_url(title: str, keywords: list[str]) -> str:
 
 
 async def _content_image_url(section_title: str, keyword: str) -> str:
-    """Pixabay (section title + article keyword); Pollinations if key missing."""
+    """Pixabay (section title + article keyword); stable Unsplash fallback."""
     url = await fetch_relevant_image(
         section_title, [keyword] if keyword else None, category="technology"
     )
-    return url or _pollinations_content_url(section_title, keyword)
+    return url or UNSPLASH_FALLBACK_IMAGE
 
 
 def _figure_html(url: str, caption: str) -> str:
@@ -880,8 +1307,8 @@ async def _images_chunk(
 
     One figure at the end of each of the first MAX_CONTENT_IMAGES <h2>
     sections; a single image after the first paragraph when the article
-    has no <h2> at all. Every image falls back to a Pollinations URL when
-    Pixabay returns nothing.
+    has no <h2> at all. Every image falls back to the stable Unsplash tech
+    image when Pixabay returns nothing.
     """
     parts = _H2_RE.split(content_html)
     if len(parts) < 3:
@@ -1005,25 +1432,23 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # Step 1/6 — Research: Tavily search + Nemotron Ultra topic pick.
+            # Step 1/6 — Recent-post dedupe + rotating Tavily news research.
             results: list[dict[str, str]] = []
             print(
-                "[AutoBlog Background] Step 1: Starting research (Tavily + "
-                "NVIDIA Nemotron Ultra topic)...",
+                "[AutoBlog Background] Step 1: Starting research (recent-post "
+                "dedupe + rotating Tavily news + NVIDIA Nemotron topic)...",
                 flush=True,
             )
             try:
-                results = await _research_chunk()
-                topic = await _topic_chunk(results)
-                research = Research(
-                    topic=topic,
-                    keywords=[],
-                    snippets=[
-                        f"{r['title']} ({r['url']}): {r['content'][:500]}"
-                        for r in results
-                        if r["content"] or r["title"]
-                    ],
+                recent_posts = await asyncio.to_thread(
+                    _fetch_recent_posts, RECENT_POSTS_LIMIT
                 )
+                print(
+                    f"[AutoBlog Background] Step 1/6: Loaded "
+                    f"{len(recent_posts)} recent post(s) for dedupe.",
+                    flush=True,
+                )
+                research, results = await _research_and_select_topic(recent_posts)
                 print(
                     f"[AutoBlog Background] Step 1/6: Research complete "
                     f"({len(results)} results, topic={research.topic!r}). "
@@ -1151,10 +1576,10 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # Step 5/6 — Images (Pixabay → Pollinations fallback, one by one).
+            # Step 5/6 — Images (Pixabay → stable Unsplash fallback).
             print(
                 "[AutoBlog Background] Step 5: Fetching images "
-                "(Pixabay, fallback Pollinations)...",
+                "(Pixabay, fallback Unsplash)...",
                 flush=True,
             )
             try:
