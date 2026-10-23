@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 # Add backend to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.auto_blog import (
     run_staggered_blog_pipeline,
@@ -31,12 +31,13 @@ from app.services.auto_blog import (
     _meta_chunk,
     _write_article,
     _cover_image,
-    _content_photo_chunk,
+    _images_chunk,
     evaluate_article,
     replace_visual_markers,
     Research,
     ARTICLE_PROFILES,
 )
+from app.services.blog_visuals import _to_number
 from app.services.blog_visuals import render_visual, replace_visual_markers as _replace_visual_markers
 from app.services.blog_content_gate import GateResult
 
@@ -48,7 +49,7 @@ async def dry_run_single(topic: str | None = None, force_topic: str | None = Non
     print(f"{'='*60}")
 
     # Fetch recent posts for dedupe
-    recent_posts = await _fetch_recent_posts()
+    recent_posts = _fetch_recent_posts()
     print(f"Recent posts for dedupe: {len(recent_posts)}")
 
     # Research and topic selection
@@ -142,7 +143,7 @@ async def dry_run_single(topic: str | None = None, force_topic: str | None = Non
                     visual_failures.append(f"Required table missing despite table data available")
 
     # Content gate evaluation
-    from app.services.auto_blog import _to_number
+    # _to_number is already imported from blog_visuals
     json_meta = article.get("_json_meta", {})
     json_repaired = json_meta.get("repaired", False)
 
@@ -188,8 +189,8 @@ async def dry_run_single(topic: str | None = None, force_topic: str | None = Non
 
     # Images
     cover, cover_source = await _cover_image("Test title", ["test"])
-    content_html_with_photo, content_images = await _content_photo_chunk(
-        rendered_html, profile, ["test"], {cover, cover_source} if cover else set()
+    content_html_with_photo, content_images = await _images_chunk(
+        rendered_html, ["test"], exclude_urls={cover, cover_source} if cover else set()
     )
 
     return {
@@ -231,18 +232,6 @@ async def dry_run_single(topic: str | None = None, force_topic: str | None = Non
         "word_count": len(re.sub(r"<[^>]+>", " ", article["content_html"]).split()),
         "rendered_html_preview": rendered_html[:2000],
     }
-
-
-def _to_number(val):
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        s = val.strip().replace(",", "").replace("%", "")
-        try:
-            return float(s)
-        except ValueError:
-            return None
-    return None
 
 
 import re

@@ -1105,8 +1105,8 @@ def _extract_named_items(text: str) -> list[str]:
     for m in matches:
         if m not in common and len(m) > 2:
             items.append(m)
-    # Also look for known AI model patterns
-    model_matches = re.findall(_AI_MODEL_RE, text, re.IGNORECASE)
+    # Also look for known AI model patterns (pattern already has IGNORECASE flag)
+    model_matches = _AI_MODEL_RE.findall(text)
     for m in model_matches:
         m_clean = " ".join(m.split())
         if m_clean not in items:
@@ -1902,27 +1902,63 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 )
             await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
 
-            # Step 2/6 — Keywords (Nemotron Ultra).
+            # Step 2/6 — Keywords + Article Type (Nemotron Ultra).
             print(
-                "[AutoBlog Background] Step 2: Extracting keywords "
+                "[AutoBlog Background] Step 2: Extracting keywords + article type "
                 "(NVIDIA Nemotron Ultra)...",
                 flush=True,
             )
             try:
-                research.keywords = await _keyword_chunk(research.topic, results)
+                keyword_plan = await _keyword_chunk(research.topic, results)
+                research.keywords = keyword_plan.keywords
+                research.article_type = keyword_plan.article_type
                 print(
                     f"[AutoBlog Background] Step 2/6: Keywords complete "
-                    f"({', '.join(research.keywords)}). "
+                    f"({', '.join(research.keywords)}, type={research.article_type}). "
+                    f"Waiting {RESEARCH_PAUSE_SECONDS}s...",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                import traceback
+                tb = traceback.format_exc()
+                # Redact potential secrets in traceback
+                import re
+                tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
+                print(
+                    f"[AutoBlog Background] Step 2/6: Keywords failed "
+                    f"({type(exc).__name__}: {exc}). Traceback: {tb}. Aborting run.",
+                    flush=True,
+                )
+                return None
+            await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
+
+            # Step 2b/6 — Data Availability & Article Profile.
+            print(
+                "[AutoBlog Background] Step 2b: Analyzing data availability...",
+                flush=True,
+            )
+            try:
+                data = _analyze_data_availability(research)
+                profile = _build_article_profile(research.article_type, research.topic, data)
+                research.data_availability = data
+                research.profile = profile
+                if profile.get("downgraded"):
+                    print(f"[AutoBlog] Profile downgraded: {profile.get('downgrade_reason')}")
+                else:
+                    print(f"[AutoBlog] Profile: {profile['article_type']}, "
+                          f"chart_data={data.has_chart_data}, table_data={data.has_table_data}")
+                print(
+                    f"[AutoBlog Background] Step 2b/6: Data analysis complete. "
                     f"Waiting {RESEARCH_PAUSE_SECONDS}s...",
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(
-                    f"[AutoBlog Background] Step 2/6: Keywords failed "
-                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    f"[AutoBlog Background] Step 2b/6: Data analysis failed "
+                    f"({type(exc).__name__}: {exc}). Using default profile.",
                     flush=True,
                 )
-                return None
+                research.profile = ARTICLE_PROFILES.get(research.article_type, ARTICLE_PROFILES["explainer"])
             await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
 
             # Step 3/6 — Meta title + description (Groq → Gemini on 429/5xx).
@@ -1939,9 +1975,13 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
+                import traceback
+                import re
+                tb = traceback.format_exc()
+                tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
                 print(
                     f"[AutoBlog Background] Step 3/6: Meta failed "
-                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    f"({type(exc).__name__}: {exc}). Traceback: {tb}. Aborting run.",
                     flush=True,
                 )
                 return None
@@ -1961,9 +2001,13 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
+                import traceback
+                import re
+                tb = traceback.format_exc()
+                tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
                 print(
                     f"[AutoBlog Background] Step 4/6: Writing failed "
-                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    f"({type(exc).__name__}: {exc}). Traceback: {tb}. Aborting run.",
                     flush=True,
                 )
                 return None
@@ -1988,9 +2032,13 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                         research, seo_feedback=seo_report["feedback"]
                     )
                 except Exception as exc:  # noqa: BLE001 - discard, never crash
+                    import traceback
+                    import re
+                    tb = traceback.format_exc()
+                    tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
                     print(
                         "[AutoBlog Background] SEO gate rewrite failed "
-                        f"({type(exc).__name__}: {exc}). Draft discarded "
+                        f"({type(exc).__name__}: {exc}). Traceback: {tb}. Draft discarded "
                         "(nothing saved).",
                         flush=True,
                     )
@@ -2033,9 +2081,13 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     flush=True,
                 )
             except Exception as exc:  # noqa: BLE001
+                import traceback
+                import re
+                tb = traceback.format_exc()
+                tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
                 print(
                     f"[AutoBlog Background] Step 5/6: Images failed "
-                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    f"({type(exc).__name__}: {exc}). Traceback: {tb}. Aborting run.",
                     flush=True,
                 )
                 return None
@@ -2070,9 +2122,13 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                     "keywords": research.keywords,
                 }
             except Exception as exc:  # noqa: BLE001
+                import traceback
+                import re
+                tb = traceback.format_exc()
+                tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
                 print(
                     f"[AutoBlog Background] Step 6/6: Upload failed "
-                    f"({type(exc).__name__}: {exc}). Aborting run.",
+                    f"({type(exc).__name__}: {exc}). Traceback: {tb}. Aborting run.",
                     flush=True,
                 )
                 return None
