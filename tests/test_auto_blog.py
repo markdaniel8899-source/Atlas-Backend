@@ -519,6 +519,19 @@ class TestContentImageHelpers(unittest.TestCase):
             )
         self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGE)
 
+    def test_excluded_fallback_moves_to_next_unsplash(self):
+        with mock.patch.object(
+            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=None)
+        ):
+            url = asyncio.run(
+                auto_blog._content_image_url(
+                    "Focus techniques",
+                    "deep work",
+                    exclude_urls={auto_blog.UNSPLASH_FALLBACK_IMAGE},
+                )
+            )
+        self.assertEqual(url, auto_blog.UNSPLASH_FALLBACK_IMAGES[1])
+
     def test_pixabay_hit_wins(self):
         with mock.patch.object(
             auto_blog,
@@ -530,15 +543,75 @@ class TestContentImageHelpers(unittest.TestCase):
             )
         self.assertEqual(url, "https://cdn.pixabay.com/inline.jpg")
 
+    def test_exclusions_are_forwarded_to_fetch(self):
+        fetch = mock.AsyncMock(return_value="https://cdn.pixabay.com/inline.jpg")
+        with mock.patch.object(auto_blog, "fetch_relevant_image", fetch):
+            asyncio.run(
+                auto_blog._content_image_url(
+                    "Focus techniques",
+                    "deep work",
+                    exclude_urls={"https://cdn.pixabay.com/cover.jpg"},
+                )
+            )
+        self.assertEqual(
+            fetch.call_args.kwargs["exclude_urls"],
+            {"https://cdn.pixabay.com/cover.jpg"},
+        )
 
-def _run_images_chunk(html_in, keywords, image_url=None):
+
+class TestPickHitExclusions(unittest.TestCase):
+    def test_skips_excluded_urls(self):
+        hits = [
+            {"largeImageURL": "https://cdn.pixabay.com/cover.jpg", "tags": "coding"},
+            {"largeImageURL": "https://cdn.pixabay.com/second.jpg", "tags": "coding"},
+        ]
+        picked = auto_blog._pick_hit(
+            hits, "ai coding", {"https://cdn.pixabay.com/cover.jpg"}
+        )
+        self.assertEqual(picked, "https://cdn.pixabay.com/second.jpg")
+
+    def test_returns_empty_when_every_hit_is_excluded(self):
+        hits = [
+            {"largeImageURL": "https://cdn.pixabay.com/a.jpg", "tags": "coding"},
+            {"largeImageURL": "https://cdn.pixabay.com/b.jpg", "tags": "coding"},
+        ]
+        picked = auto_blog._pick_hit(
+            hits,
+            "ai coding",
+            {
+                "https://cdn.pixabay.com/a.jpg",
+                "https://cdn.pixabay.com/b.jpg",
+            },
+        )
+        self.assertEqual(picked, "")
+
+
+def _run_images_chunk(
+    html_in,
+    keywords,
+    image_url=None,
+    *,
+    image_urls=None,
+    max_images=auto_blog.MAX_CONTENT_IMAGES,
+    exclude_urls=None,
+):
+    fetch = (
+        mock.AsyncMock(return_value=image_url)
+        if image_urls is None
+        else mock.AsyncMock(side_effect=image_urls)
+    )
     with (
         mock.patch.object(auto_blog, "IMAGE_PAUSE_SECONDS", 0),
-        mock.patch.object(
-            auto_blog, "fetch_relevant_image", mock.AsyncMock(return_value=image_url)
-        ),
+        mock.patch.object(auto_blog, "fetch_relevant_image", fetch),
     ):
-        return asyncio.run(auto_blog._images_chunk(html_in, keywords))
+        return asyncio.run(
+            auto_blog._images_chunk(
+                html_in,
+                keywords,
+                max_images=max_images,
+                exclude_urls=exclude_urls,
+            )
+        )
 
 
 class TestImagesChunk(unittest.TestCase):
@@ -568,11 +641,61 @@ class TestImagesChunk(unittest.TestCase):
             "<h2>Section Two</h2><p>Body two.</p>"
         )
         out, images = _run_images_chunk(
-            html_in, ["ai"], image_url="https://cdn.pixabay.com/x.jpg"
+            html_in,
+            ["ai"],
+            image_urls=[
+                "https://cdn.pixabay.com/x.jpg",
+                "https://cdn.pixabay.com/y.jpg",
+            ],
         )
         self.assertEqual(len(images), 2)
         self.assertEqual(images[0]["url"], "https://cdn.pixabay.com/x.jpg")
+        self.assertEqual(images[1]["url"], "https://cdn.pixabay.com/y.jpg")
         self.assertIn('src="https://cdn.pixabay.com/x.jpg"', out)
+
+    def test_random_target_controls_image_count(self):
+        html_in = (
+            "<h2>Section One</h2><p>Body one.</p>"
+            "<h2>Section Two</h2><p>Body two.</p>"
+            "<h2>Section Three</h2><p>Body three.</p>"
+        )
+        with mock.patch.object(
+            auto_blog.random, "randint", return_value=1
+        ) as randint:
+            out, images = _run_images_chunk(
+                html_in, ["ai"], max_images=None
+            )
+        self.assertEqual(len(images), 1)
+        self.assertEqual(out.count("<img "), 1)
+        randint.assert_called_once_with(
+            auto_blog.MIN_CONTENT_IMAGES, auto_blog.MAX_CONTENT_IMAGES
+        )
+
+    def test_cover_and_used_urls_are_never_reused(self):
+        html_in = (
+            "<h2>Section One</h2><p>Body one.</p>"
+            "<h2>Section Two</h2><p>Body two.</p>"
+            "<h2>Section Three</h2><p>Body three.</p>"
+        )
+        cover = "https://cdn.pixabay.com/cover.jpg"
+        out, images = _run_images_chunk(
+            html_in,
+            ["ai"],
+            image_urls=[
+                cover,
+                "https://cdn.pixabay.com/second.jpg",
+                "https://cdn.pixabay.com/third.jpg",
+            ],
+            exclude_urls={cover},
+        )
+        self.assertEqual(
+            [image["url"] for image in images],
+            [
+                "https://cdn.pixabay.com/second.jpg",
+                "https://cdn.pixabay.com/third.jpg",
+            ],
+        )
+        self.assertNotIn(f'src="{cover}"', out)
 
     def test_falls_back_to_unsplash_per_image(self):
         html_in = (

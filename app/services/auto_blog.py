@@ -35,13 +35,14 @@ no provider sees a burst of back-to-back calls (avoids 429s):
                       / tags) with a direct answer opening, inline citations
                       and a mandatory FAQ section; same Gemini retry on
                       429/5xx.                                         [3s]
-  5. Images        — Pixabay cover + up to three in-article photos,
+  5. Images        — Pixabay cover + 1-3 randomized in-article photos,
                      fetched ONE BY ONE with a 3s pause between each.
-                     The cover is downloaded, cropped to 1200x630,
-                     compressed to WebP, and uploaded to Cloudflare R2
-                     (stable Unsplash URL on failure). In-article images
-                     keep their external CDN URLs and are stored in
-                     blog_posts.content_images.
+                     Cover and in-article URLs are deduplicated so no
+                     image repeats. The cover is downloaded, cropped to
+                     1200x630, compressed to WebP, and uploaded to
+                     Cloudflare R2 (stable Unsplash URL on failure).
+                     In-article images keep their external CDN URLs and
+                     are stored in blog_posts.content_images.
   6. Upload        — supabase-py insert into public.blog_posts with the
                      service-role key (RLS-bypassing writer).
 
@@ -63,6 +64,7 @@ import asyncio
 import difflib
 import html
 import os
+import random
 import re
 import sys
 import threading
@@ -120,7 +122,9 @@ PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "").strip()
 
 MAX_RESULTS = 5  # "top 3-5 keywords" → cap at 5
 
-# How many in-article images to embed (one per H2 section, first N sections).
+# In-article image count is randomized per run: 1-3 images (plus the cover),
+# so every post ends up with 2-4 visuals in total.
+MIN_CONTENT_IMAGES = 1
 MAX_CONTENT_IMAGES = 3
 
 # Deliberate pauses between chunks — keep every provider under its rate limit.
@@ -206,28 +210,36 @@ STRICT SEO, AEO, & GEO REQUIREMENTS (MUST FOLLOW):
    - Never open with fluff such as "In today's fast-paced world" or a long wind-up.
 
 2. STRUCTURE & READABILITY:
-   - Use proper HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>.
+   - Use proper HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, and <table> only when the topic calls for it.
    - Keep paragraphs short (1-3 sentences).
    - Use bullet points for features, steps, or comparisons. At least one bullet list per article.
    - Write 3-5 body sections, each opened by an engaging <h2>; use <h3> where it helps.
 
-3. KEYWORD DENSITY (SEO):
+3. DYNAMIC FORMATTING & VISUALS (Context-Aware):
+   - Analyze the nature of the topic and choose the format that informs best. Never force a table into an article where it does not fit.
+   - Theoretical, conceptual, or opinion topics: use narrative paragraphs and bullets; do NOT use a <table>.
+   - Research, data, or statistics-heavy topics: MUST include one HTML <table> with <thead>, <tbody>, <tr>, <th> and <td>, plus a one-sentence introduction before it.
+   - Comparison or "versus" topics: MUST include one comparison <table> (features, pros and cons, benchmarks) plus a short bullet summary.
+   - Visuals: the publishing pipeline places 1-3 highly relevant images automatically, including a conceptual image mid-article. Do NOT output <img> tags, placeholders, or image URLs; just keep the middle sections visual-friendly.
+   - Every <h2> and <h3> must be unique and descriptive. Never repeat the same heading text, and never restate a heading's wording as plain text directly beneath it.
+
+4. KEYWORD DENSITY (SEO):
    - Naturally include the exact primary keyword 5-7 times. Never stuff.
    - Include it in the first 100 words, in at least one <h2> heading, and in the closing section.
    - Use semantic/LSI keywords related to the topic naturally.
 
-4. AUTHORITY & CITATIONS (GEO):
+5. AUTHORITY & CITATIONS (GEO):
    - Cite primary sources naturally in the text (for example, "According to the official documentation..." or "As announced by...").
    - Link 2-3 of the supplied source URLs inline with <a href="..." rel="noopener">.
    - Ground every claim in the research provided. If unsure about a statistic, phrase it generally. Never invent studies or numbers.
    - Maintain an objective, expert, professional tone. E-E-A-T compliant.
 
-5. MANDATORY FAQ SECTION (AEO):
+6. MANDATORY FAQ SECTION (AEO):
    - At the very end of the article, add an <h2>FAQ</h2> section.
    - Include exactly 3-4 specific, long-tail questions related to the topic, each followed by a concise, direct answer of 40-60 words.
    - Format: <h3>Question?</h3><p>Direct, clear answer.</p>
 
-6. LENGTH:
+7. LENGTH:
    - Write between 800 and 1200 words for comprehensive coverage.
 
 VOICE & OUTPUT RULES:
@@ -1033,11 +1045,17 @@ async def _write_article(
 
 # ─────────────── Stage 3 · Cover + in-article images (Pixabay first) ─────────
 
-# Final fallback when Pixabay has nothing for ANY query in the ladder —
-# a stable Unsplash "AI / abstract tech" photo (not generic business stock).
-UNSPLASH_FALLBACK_IMAGE = (
-    "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1200"
+# Final fallback when Pixabay has nothing for ANY query in the ladder — a
+# small pool of stable Unsplash tech photos (not generic business stock).
+# The pool lets content images stay unique when the cover already used the
+# first fallback.
+UNSPLASH_FALLBACK_IMAGES: tuple[str, ...] = (
+    "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1200",
+    "https://images.unsplash.com/photo-1737071371043-761e02b1ef95?w=1200&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200",
+    "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=1200",
 )
+UNSPLASH_FALLBACK_IMAGE = UNSPLASH_FALLBACK_IMAGES[0]
 
 PIXABAY_UNSWORTHY_HITS = frozenset(
     {
@@ -1166,13 +1184,18 @@ def _pixabay_category(title: str, keywords: list[str]) -> str:
     return "computer"
 
 
-def _pick_hit(hits: list[dict], query: str) -> str:
+def _pick_hit(
+    hits: list[dict], query: str, exclude_urls: set[str] | None = None
+) -> str:
     """Pick the best hit: skip food decoys and prefer tech/coding imagery.
 
     Literal title words (e.g. "AI Is Eating Software") otherwise surface
     cake/food photos. On tech queries, hits tagged with coding/robotics/science
     outrank generic business/office stock, while the API order breaks ties.
+    URLs in `exclude_urls` (the cover and earlier in-article images) are
+    skipped so the same photo is never used twice.
     """
+    excluded = exclude_urls or set()
     query_is_techy = _query_is_techy(query)
     ranked: list[tuple[int, int, dict]] = []
     for index, hit in enumerate(hits):
@@ -1188,19 +1211,33 @@ def _pick_hit(hits: list[dict], query: str) -> str:
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     for _, _, hit in ranked:
         url = str(hit.get("largeImageURL") or "").strip()
-        if url:
+        if url and url not in excluded:
             return url
 
     # Every hit was filtered out — take the first usable URL anyway.
     for hit in hits:
         url = str(hit.get("largeImageURL") or "").strip()
-        if url:
+        if url and url not in excluded:
             return url
     return ""
 
 
+def _unused_unsplash_fallback(
+    exclude_urls: set[str] | None = None,
+) -> str | None:
+    """Return the first fallback photo not already used in this post."""
+    excluded = exclude_urls or set()
+    for url in UNSPLASH_FALLBACK_IMAGES:
+        if url not in excluded:
+            return url
+    return None
+
+
 async def fetch_relevant_image(
-    title: str, keywords: list[str] | None = None, category: str | None = None
+    title: str,
+    keywords: list[str] | None = None,
+    category: str | None = None,
+    exclude_urls: set[str] | None = None,
 ) -> str | None:
     """Fetch a relevant photo from Pixabay using specific news/model terms.
 
@@ -1213,10 +1250,12 @@ async def fetch_relevant_image(
 
     Tech queries also send a valid Pixabay category (computer/science/
     education/business) and rank coding/robotics tags above generic business
-    stock. Returns the largeImageURL, the stable Unsplash tech fallback when
-    nothing relevant is found, or None when there is no API key (the caller
-    then uses the same Unsplash fallback).
+    stock. `exclude_urls` skips photos already used as the cover or in an
+    earlier section, so each call can return the next unique image. Returns
+    the largeImageURL, a stable Unsplash tech fallback when nothing relevant
+    is found, or None when there is no API key or every fallback is excluded.
     """
+    excluded = exclude_urls or set()
     if not PIXABAY_API_KEY:
         return None
 
@@ -1254,16 +1293,23 @@ async def fetch_relevant_image(
                 continue
             hits = data.get("hits") if isinstance(data, dict) else None
             if hits:
-                url = _pick_hit(hits, query)
+                url = _pick_hit(hits, query, excluded)
                 if url:
                     print(f"[AutoBlog] Pixabay image OK for {query!r}", flush=True)
                     return url
 
-    print(
-        f"[AutoBlog] Pixabay found nothing for {title!r} — using Unsplash fallback.",
-        flush=True,
-    )
-    return UNSPLASH_FALLBACK_IMAGE
+    fallback = _unused_unsplash_fallback(excluded)
+    if fallback:
+        print(
+            f"[AutoBlog] Pixabay found nothing for {title!r} — using Unsplash fallback.",
+            flush=True,
+        )
+    else:
+        print(
+            f"[AutoBlog] Pixabay found only duplicate images for {title!r} — skipping.",
+            flush=True,
+        )
+    return fallback
 
 
 MAX_COVER_DOWNLOAD_BYTES = 15 * 1024 * 1024
@@ -1275,7 +1321,7 @@ async def _persist_cover_image(url: str, slug: str) -> str:
     Pixabay ``/get/...`` URLs expire, so they must never be saved. Any
     download/upload failure falls back to the stable Unsplash image.
     """
-    if not url or url == UNSPLASH_FALLBACK_IMAGE:
+    if not url or url in UNSPLASH_FALLBACK_IMAGES:
         return UNSPLASH_FALLBACK_IMAGE
 
     try:
@@ -1322,22 +1368,43 @@ _FAQ_H2_RE = re.compile(
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-async def _cover_image_url(title: str, keywords: list[str]) -> str:
-    """Fetch a cover and return only a durable R2 or Unsplash URL."""
+async def _cover_image(title: str, keywords: list[str]) -> tuple[str, str]:
+    """Build the cover, returning (durable URL, source URL to dedupe against).
+
+    The source URL is the Pixabay photo before it is persisted to R2; content
+    images must skip it because the persisted R2 URL no longer matches.
+    """
     candidate = await fetch_relevant_image(
         title, keywords, category="technology"
     )
     if not candidate:
-        return UNSPLASH_FALLBACK_IMAGE
-    return await _persist_cover_image(candidate, slugify(title))
+        return UNSPLASH_FALLBACK_IMAGE, UNSPLASH_FALLBACK_IMAGE
+    cover = await _persist_cover_image(candidate, slugify(title))
+    return cover, candidate
 
 
-async def _content_image_url(section_title: str, keyword: str) -> str:
-    """Pixabay (section title + article keyword); stable Unsplash fallback."""
+async def _cover_image_url(title: str, keywords: list[str]) -> str:
+    """Fetch a cover and return only a durable R2 or Unsplash URL."""
+    cover, _ = await _cover_image(title, keywords)
+    return cover
+
+
+async def _content_image_url(
+    section_title: str,
+    keyword: str,
+    exclude_urls: set[str] | None = None,
+) -> str | None:
+    """Pixabay (section title + article keyword); unused Unsplash fallback.
+
+    Returns None when every available photo is already used in this post.
+    """
     url = await fetch_relevant_image(
-        section_title, [keyword] if keyword else None, category="technology"
+        section_title,
+        [keyword] if keyword else None,
+        category="technology",
+        exclude_urls=exclude_urls,
     )
-    return url or UNSPLASH_FALLBACK_IMAGE
+    return url or _unused_unsplash_fallback(exclude_urls)
 
 
 def _figure_html(url: str, caption: str) -> str:
@@ -1351,21 +1418,43 @@ def _figure_html(url: str, caption: str) -> str:
 
 
 async def _images_chunk(
-    content_html: str, keywords: list[str]
+    content_html: str,
+    keywords: list[str],
+    *,
+    max_images: int | None = None,
+    exclude_urls: set[str] | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Step 5/6: Pixabay images ONE BY ONE (pause between each).
 
-    One figure at the end of each of the first MAX_CONTENT_IMAGES <h2>
-    sections; a single image after the first paragraph when the article
-    has no <h2> at all. Every image falls back to the stable Unsplash tech
-    image when Pixabay returns nothing.
+    Fetches a random 1-3 in-article images (one per eligible <h2>, or a single
+    image after the first paragraph when the article has no <h2>). The cover
+    URL and every in-article URL already chosen are excluded, so an image can
+    never appear twice in the same post. Every image falls back to an unused
+    stable Unsplash tech image when Pixabay returns nothing unique.
     """
+    target = (
+        max_images
+        if max_images is not None
+        else random.randint(MIN_CONTENT_IMAGES, MAX_CONTENT_IMAGES)
+    )
+    target = max(0, min(target, MAX_CONTENT_IMAGES))
+    used = set(exclude_urls or ())
+
     parts = _H2_RE.split(content_html)
     if len(parts) < 3:
+        if not keywords or target == 0:
+            return content_html, []
         caption = _TAG_RE.sub(" ", parts[0])[:120].strip() or "Article illustration"
         keyword = keywords[0] if keywords else "technology"
-        url = await _content_image_url(caption, keyword)
+        url = await _content_image_url(caption, keyword, exclude_urls=used)
         await asyncio.sleep(IMAGE_PAUSE_SECONDS)
+        if not url or url in used:
+            print(
+                "[AutoBlog] no unique content image for the intro — skipping.",
+                flush=True,
+            )
+            return content_html, []
+        used.add(url)
         figure = _figure_html(url, caption)
         if "</p>" in content_html:
             head, tail = content_html.split("</p>", 1)
@@ -1381,15 +1470,29 @@ async def _images_chunk(
         body = parts[i + 1] if i + 1 < len(parts) else ""
         # Never inject an image inside the FAQ block: the AEO answer format
         # (<h3>question</h3><p>answer</p>) must stay uninterrupted.
-        if section < MAX_CONTENT_IMAGES and keywords and not _FAQ_H2_RE.search(h2):
+        should_fetch = (
+            len(images) < target and keywords and not _FAQ_H2_RE.search(h2)
+        )
+        if should_fetch:
             caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
             url = await _content_image_url(
-                caption, keywords[section % len(keywords)]
+                caption,
+                keywords[section % len(keywords)],
+                exclude_urls=used,
             )
             if images:
                 await asyncio.sleep(IMAGE_PAUSE_SECONDS)
+            if not url or url in used:
+                print(
+                    f"[AutoBlog] duplicate content image skipped: {caption!r}",
+                    flush=True,
+                )
+                out.append(h2)
+                out.append(body)
+                continue
+            used.add(url)
             print(
-                f"[AutoBlog] content image {len(images) + 1}/{MAX_CONTENT_IMAGES} "
+                f"[AutoBlog] content image {len(images) + 1}/{target} "
                 f"ready: {caption!r}"
             )
             body = f"{body}{_figure_html(url, caption)}"
@@ -1628,17 +1731,21 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # Step 5/6 — Images (Pixabay → stable Unsplash fallback).
+            # Step 5/6 — Images (cover first, then 1-3 unique in-article images).
             print(
                 "[AutoBlog Background] Step 5: Fetching images "
                 "(Pixabay, fallback Unsplash)...",
                 flush=True,
             )
             try:
-                content_html, content_images = await _images_chunk(
-                    article["content_html"], research.keywords
+                cover, cover_source = await _cover_image(
+                    meta_title, research.keywords
                 )
-                cover = await _cover_image_url(meta_title, research.keywords)
+                content_html, content_images = await _images_chunk(
+                    article["content_html"],
+                    research.keywords,
+                    exclude_urls={cover, cover_source},
+                )
                 print(
                     f"[AutoBlog Background] Step 5/6: Images complete "
                     f"({len(content_images)} in-article + cover).",
