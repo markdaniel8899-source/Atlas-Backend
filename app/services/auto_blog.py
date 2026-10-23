@@ -30,9 +30,11 @@ no provider sees a burst of back-to-back calls (avoids 429s):
   3. Meta          — Groq writes the catchy meta title + meta
                      description (plain fallbacks; Gemini retry on
                      429/5xx).                                    [3s]
-  4. Write         — Groq writes a ~1000-word, SEO-optimised article
-                     as strict JSON (title / excerpt / content_html /
-                     tags); same Gemini retry on 429/5xx.         [3s]
+  4. Write         — Groq writes an 800-1200-word, SEO/AEO/GEO-optimised
+                      article as strict JSON (title / excerpt / content_html
+                      / tags) with a direct answer opening, inline citations
+                      and a mandatory FAQ section; same Gemini retry on
+                      429/5xx.                                         [3s]
   5. Images        — Pixabay cover + up to three in-article photos,
                      fetched ONE BY ONE with a 3s pause between each.
                      The cover is downloaded, cropped to 1200x630,
@@ -195,25 +197,51 @@ _STOPWORDS = frozenset(
     """.split()
 )
 
-_WRITER_SYSTEM = """You are a senior staff writer for ATLAS, a learning OS for students. Your articles get published on our public blog.
+_WRITER_SYSTEM = """You are an expert tech journalist and industry analyst writing for ATLAS, a learning OS for students. Your articles are published on our public blog and must be citable by both Google and AI assistants.
 
-Non-negotiable voice rules:
-- Write like a sharp friend explaining something interesting: contractions, direct "you", occasional rhetorical questions. Warm, specific, opinionated. A human wrote this.
+STRICT SEO, AEO, & GEO REQUIREMENTS (MUST FOLLOW):
+
+1. DIRECT ANSWER FIRST (AEO):
+   - Answer the core user query directly within the first 2 sentences of the introduction.
+   - Never open with fluff such as "In today's fast-paced world" or a long wind-up.
+
+2. STRUCTURE & READABILITY:
+   - Use proper HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>.
+   - Keep paragraphs short (1-3 sentences).
+   - Use bullet points for features, steps, or comparisons. At least one bullet list per article.
+   - Write 3-5 body sections, each opened by an engaging <h2>; use <h3> where it helps.
+
+3. KEYWORD DENSITY (SEO):
+   - Naturally include the exact primary keyword 5-7 times. Never stuff.
+   - Include it in the first 100 words, in at least one <h2> heading, and in the closing section.
+   - Use semantic/LSI keywords related to the topic naturally.
+
+4. AUTHORITY & CITATIONS (GEO):
+   - Cite primary sources naturally in the text (for example, "According to the official documentation..." or "As announced by...").
+   - Link 2-3 of the supplied source URLs inline with <a href="..." rel="noopener">.
+   - Ground every claim in the research provided. If unsure about a statistic, phrase it generally. Never invent studies or numbers.
+   - Maintain an objective, expert, professional tone. E-E-A-T compliant.
+
+5. MANDATORY FAQ SECTION (AEO):
+   - At the very end of the article, add an <h2>FAQ</h2> section.
+   - Include exactly 3-4 specific, long-tail questions related to the topic, each followed by a concise, direct answer of 40-60 words.
+   - Format: <h3>Question?</h3><p>Direct, clear answer.</p>
+
+6. LENGTH:
+   - Write between 800 and 1200 words for comprehensive coverage.
+
+VOICE & OUTPUT RULES:
+- Write like a sharp, authoritative tech journalist: contractions, direct "you", specific examples. A human wrote this.
 - BANNED words and phrases (using any of them fails the brief): delve, delve into, moreover, furthermore, in conclusion, additionally, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, testament to, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm.
-- Short paragraphs only: 1-3 sentences each. White space is a feature.
-- Use bullet lists (HTML <ul><li>) for tips, steps or facts — at least one list per article.
 - Never use em dashes (—) or en dashes (–) anywhere in the title, excerpt or body. Use commas, colons or parentheses instead.
-- Structure: 3-5 sections, each opened by an engaging <h2>; <h3> where it helps. Plain HTML fragment — never <html>, <head> or <body>.
-- SEO: work the primary keyword into the first 100 words and into one <h2>; use the other keywords naturally, never stuffed.
-- Ground claims in the research provided. Link 2-3 of the source URLs inline with <a href="..." rel="noopener">. If unsure about a statistic, phrase it generally — never invent studies or numbers.
-- Length: about 1000 words (900-1100).
+- The content_html value is a plain HTML fragment: never <html>, <head> or <body>. The article must end with the FAQ section.
 
 Return ONLY strict JSON (no markdown fences, no commentary before or after):
 {"title": "...", "excerpt": "...", "content_html": "...", "tags": ["...", "..."]}
 
-- title: max 110 chars, specific and engaging, no clickbait lies.
-- excerpt: 140-180 chars of plain text containing the primary keyword (used as the meta description).
-- content_html: the full article body as an HTML fragment.
+- title: max 110 chars, specific and engaging, contains the primary keyword, no clickbait lies.
+- excerpt: 130-155 chars of plain text containing the primary keyword (used as the meta description).
+- content_html: the full article body as an HTML fragment, ending with the FAQ section.
 - tags: 3-5 lowercase topic tags."""
 
 _TOPIC_SYSTEM = """You are an SEO trend analyst for ATLAS, a learning OS for students.
@@ -239,8 +267,8 @@ _META_SYSTEM = """You are an SEO meta-copy expert. From the topic and keywords p
 Return ONLY strict JSON (no fences, no commentary):
 {"meta_title": "...", "meta_description": "..."}
 
-- meta_title: catchy and specific, max 110 chars, may include a number or power word.
-- meta_description: 140-180 chars, contains the primary keyword, entices a click. Plain text only.
+- meta_title: catchy and specific, max 110 chars, MUST contain the exact primary keyword supplied by the user, may include a number or power word.
+- meta_description: 130-155 chars (never below 120 or above 160), MUST contain the primary keyword, entices a click. Plain text only.
 - No em dashes (—) or en dashes (–); use commas or colons instead."""
 
 
@@ -887,11 +915,14 @@ async def _meta_chunk(research: Research) -> tuple[str, str]:
     Plain (non-LLM) fallbacks keep the run alive when BOTH providers fail.
     """
     sources = "\n".join(f"- {s}" for s in research.snippets[:3]) or "(none)"
+    primary_keyword = research.keywords[0] if research.keywords else research.topic
+    other_keywords = ", ".join(research.keywords[1:]) or "(none)"
     try:
         text = await _groq_with_gemini_fallback(
             _META_SYSTEM,
             f"Topic: {research.topic}\n"
-            f"Keywords: {', '.join(research.keywords)}\n"
+            f"Primary keyword: {primary_keyword}\n"
+            f"Other keywords: {other_keywords}\n"
             f"Research snippets:\n{sources}",
             temperature=0.7,
             max_tokens=1024,
@@ -910,7 +941,15 @@ async def _meta_chunk(research: Research) -> tuple[str, str]:
         if research.snippets
         else research.topic
     )
-    return research.topic[:300], fallback_desc
+    # Keep the SEO gate passable even on the non-LLM path: the title must
+    # contain the primary keyword, so append it when the topic lacks it.
+    fallback_title = research.topic
+    if (
+        primary_keyword
+        and primary_keyword.lower() not in fallback_title.lower()
+    ):
+        fallback_title = f"{fallback_title}: {primary_keyword}"
+    return fallback_title[:300], fallback_desc
 
 
 # ────────────────────────────── Stage 2 · Write ───────────────────────────────
@@ -920,24 +959,32 @@ async def _write_article(
     research: Research, seo_feedback: str | None = None
 ) -> dict[str, Any]:
     sources = "\n".join(f"- {s}" for s in research.snippets) or "(none)"
+    primary_keyword = research.keywords[0] if research.keywords else research.topic
+    secondary_keywords = ", ".join(research.keywords[1:]) or "(none)"
     user_prompt = (
         f"Trending topic: {research.topic}\n"
-        f"Target keywords (weave all of them in naturally): "
-        f"{', '.join(research.keywords)}\n"
+        f"Primary keyword: {primary_keyword}\n"
+        f"Secondary keywords (weave in naturally): {secondary_keywords}\n"
         f"Today's research (ground the article in these, link 2-3 inline):\n"
         f"{sources}\n\n"
-        "Write the article now — remember: banned words fail the brief, "
-        "short paragraphs, bullet points, engaging H2/H3 headings, ~1000 words. "
-        "Write in basic, simple, human-like language. Avoid robotic AI words "
-        "(delve, moreover, testament). Avoid keyword stuffing. Naturally place "
-        "the extracted keywords. 100% unique, no plagiarism."
+        "Write the article now. Open by answering the reader's core question "
+        "directly in the first 2 sentences, with no wind-up. Include the exact "
+        "primary keyword 5-7 times naturally, plus once in the first 100 words, "
+        "once in an <h2>, and once in the closing section. Use short paragraphs "
+        "(1-3 sentences), at least one <ul><li> list, and 3-5 body sections. "
+        "End with a mandatory <h2>FAQ</h2> section containing exactly 3-4 "
+        "<h3>questions</h3>, each answered in 40-60 words. Target 800-1200 "
+        "words. Banned words fail the brief. Write in simple, human-like "
+        "language. 100% unique, no plagiarism."
     )
     if seo_feedback:
         user_prompt += (
             "\n\nIMPORTANT: a lightweight SEO checker rejected your previous "
             f"draft. Fix ALL of these issues in this rewrite:\n- {seo_feedback}\n"
             "Keep the same topic, keywords and research; make the fixes "
-            "minimally and keep the article ~1000 words."
+            "minimally and keep the article between 800 and 1200 words. Keep "
+            "the direct 2-sentence opening, 5-7 uses of the primary keyword, "
+            "and the final <h2>FAQ</h2> section with 3-4 Q&A pairs."
         )
 
     text = await _groq_with_gemini_fallback(
@@ -1269,6 +1316,9 @@ async def _persist_cover_image(url: str, slug: str) -> str:
 
 
 _H2_RE = re.compile(r"(<h2[^>]*>.*?</h2>)", re.IGNORECASE | re.DOTALL)
+_FAQ_H2_RE = re.compile(
+    r"<h2[^>]*>\s*(?:FAQ\b|Frequently Asked Questions\b)", re.IGNORECASE
+)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -1329,7 +1379,9 @@ async def _images_chunk(
     for section, i in enumerate(range(1, len(parts), 2)):
         h2 = parts[i]
         body = parts[i + 1] if i + 1 < len(parts) else ""
-        if section < MAX_CONTENT_IMAGES and keywords:
+        # Never inject an image inside the FAQ block: the AEO answer format
+        # (<h3>question</h3><p>answer</p>) must stay uninterrupted.
+        if section < MAX_CONTENT_IMAGES and keywords and not _FAQ_H2_RE.search(h2):
             caption = _TAG_RE.sub(" ", h2).strip()[:120] or f"Section {section + 1}"
             url = await _content_image_url(
                 caption, keywords[section % len(keywords)]

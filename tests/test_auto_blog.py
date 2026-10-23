@@ -601,6 +601,19 @@ class TestImagesChunk(unittest.TestCase):
         self.assertNotIn('alt="Tom & Jerry', out)
         self.assertEqual(images[0]["caption"], 'Tom & Jerry\'s "Study"')
 
+    def test_faq_section_is_not_given_an_image(self):
+        html_in = (
+            "<p>Intro paragraph.</p>"
+            "<h2>Section One</h2><p>Body one.</p>"
+            "<h2>FAQ</h2><h3>What is it?</h3><p>A direct answer.</p>"
+        )
+        out, images = _run_images_chunk(html_in, ["ai"])
+        self.assertEqual(len(images), 1)
+        # FAQ Q&A markup stays intact, with no <img> before the next heading.
+        self.assertIn(
+            "<h2>FAQ</h2><h3>What is it?</h3><p>A direct answer.</p>", out
+        )
+
     def test_empty_keywords_skips_images(self):
         html_in = "<h2>Only</h2><p>x</p>"
         out, images = _run_images_chunk(html_in, [])
