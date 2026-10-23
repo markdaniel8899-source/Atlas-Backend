@@ -86,6 +86,12 @@ from app import ai_service
 from app.cache import clear_all as clear_read_caches
 from app.config import get_settings
 from app.plugins.seo_checker import evaluate_seo_lightweight
+from app.services.blog_content_gate import evaluate_article, GateResult
+from app.services.blog_visuals import (
+    render_visual,
+    replace_visual_markers,
+    render_visual_html_fallback,
+)
 from app.services.r2_storage import r2_storage
 
 # Every print() in this module goes to stdout, which `nohup ... > server.log`
@@ -188,6 +194,94 @@ FALLBACK_TOPICS = (
     "What's Next for AI Models",
 )
 
+# ───────────────────── Article Profile & Data Availability ────────────────────
+
+# Article type taxonomy
+ARTICLE_TYPES = (
+    "news",
+    "explainer",
+    "how_to",
+    "opinion",
+    "comparison",
+    "benchmark",
+    "financial",
+    "growth",
+    "research",
+)
+
+# Profile definitions: cover_photo, max_content_photos, required_visuals, max_visuals
+ARTICLE_PROFILES: dict[str, dict[str, Any]] = {
+    "comparison": {
+        "cover_photo": True,
+        "max_content_photos": 0,
+        "required_visuals": ("table",),
+        "optional_visuals": ("bar",),
+        "max_visuals": 2,
+    },
+    "benchmark": {
+        "cover_photo": True,
+        "max_content_photos": 0,
+        "required_visuals": ("table", "bar"),
+        "max_visuals": 2,
+    },
+    "financial": {
+        "cover_photo": True,
+        "max_content_photos": 0,
+        "required_visuals": ("bar", "table"),
+        "max_visuals": 2,
+    },
+    "growth": {
+        "cover_photo": True,
+        "max_content_photos": 0,
+        "required_visuals": ("bar", "line"),
+        "max_visuals": 2,
+    },
+    "research": {
+        "cover_photo": True,
+        "max_content_photos": 0,
+        "required_visuals": ("table", "bar", "line"),
+        "max_visuals": 1,
+    },
+    "news": {
+        "cover_photo": True,
+        "max_content_photos": 1,
+        "required_visuals": (),
+        "max_visuals": 1,
+    },
+    "explainer": {
+        "cover_photo": True,
+        "max_content_photos": 1,
+        "required_visuals": (),
+        "max_visuals": 1,
+    },
+    "how_to": {
+        "cover_photo": True,
+        "max_content_photos": 1,
+        "required_visuals": (),
+        "max_visuals": 1,
+    },
+    "opinion": {
+        "cover_photo": True,
+        "max_content_photos": 1,
+        "required_visuals": (),
+        "max_visuals": 1,
+    },
+}
+
+# Heuristic upgrade keywords
+_UPGRADE_SIGNALS: dict[str, list[str]] = {
+    "comparison": ["vs", "versus", "compare", "comparison", "versus"],
+    "benchmark": ["benchmark", "benchmarks", "performance test", "speed test"],
+    "financial": ["revenue", "funding", "valuation", "investment", "series a", "series b", "ipo", "raised $", "million", "billion"],
+    "growth": ["growth", "growing", "growth rate", "yoy", "quarter over quarter", "month over month"],
+    "research": ["study", "paper", "research", "arxiv", "findings", "methodology"],
+}
+
+# Minimum data requirements
+MIN_CHART_NUMBERS = 3
+MIN_TABLE_ENTITIES = 2
+MIN_TABLE_ATTRIBUTES = 3
+
 # Only one pipeline run at a time (route + scheduler share this lock).
 _RUN_LOCK = threading.Lock()
 
@@ -240,7 +334,7 @@ STRICT SEO, AEO, & GEO REQUIREMENTS (MUST FOLLOW):
    - Format: <h3>Question?</h3><p>Direct, clear answer.</p>
 
 7. LENGTH:
-   - Write between 800 and 1200 words for comprehensive coverage.
+   - Write between 900 and 1200 words for comprehensive coverage.
 
 VOICE & OUTPUT RULES:
 - Write like a sharp, authoritative tech journalist: contractions, direct "you", specific examples. A human wrote this.
@@ -249,12 +343,19 @@ VOICE & OUTPUT RULES:
 - The content_html value is a plain HTML fragment: never <html>, <head> or <body>. The article must end with the FAQ section.
 
 Return ONLY strict JSON (no markdown fences, no commentary before or after):
-{"title": "...", "excerpt": "...", "content_html": "...", "tags": ["...", "..."]}
+{"title": "...", "excerpt": "...", "content_html": "...", "tags": ["...", "..."], "visuals": [...]}
 
 - title: max 110 chars, specific and engaging, contains the primary keyword, no clickbait lies.
 - excerpt: 130-155 chars of plain text containing the primary keyword (used as the meta description).
 - content_html: the full article body as an HTML fragment, ending with the FAQ section.
-- tags: 3-5 lowercase topic tags."""
+- tags: 3-5 lowercase topic tags.
+- visuals: array of structured visuals. Each visual is an object:
+  * For tables: {"kind": "table", "title": "...", "caption": "...", "columns": ["...", "..."], "rows": [["...", "..."], ...], "source_url": "...", "intro_sentence": "...", "takeaway": "..."}
+  * For charts: {"kind": "bar"|"line", "title": "...", "caption": "...", "unit": "...", "labels": ["...", "..."], "values": [number, ...], "source_url": "...", "intro_sentence": "...", "takeaway": "..."}
+Rules for visuals: use ONLY numbers/facts present in the supplied research. 3-8 data points (charts), 2-6 rows (tables). Every visual needs intro_sentence (a sentence that points to it and says why it matters, e.g. "The chart below shows how X grew from A to B.") and takeaway (one or two sentences interpreting what the reader should conclude, not repeating the numbers). If the research has no usable data, return "visuals": [].
+The content_html must contain the marker <!--VISUAL:0--> (and <!--VISUAL:1--> if two) at the exact spot where each visual belongs, directly after a paragraph that sets it up. Do not write <img>, <svg> or tables for visuals yourself.
+
+Tables that are simple parts of the prose may still be written as <table>; structured visuals is for the data ones."""
 
 _TOPIC_SYSTEM = """You are an SEO trend analyst for ATLAS, a learning OS for students.
 From the research snippets, pick ONE specific, currently trending, searchable blog topic (not a generic pillar term).
@@ -270,9 +371,12 @@ _KEYWORD_SYSTEM = """You are an SEO content strategist for ATLAS, a learning OS 
 Extract the top 3 to 5 SEO keywords for the given blog topic.
 
 Return ONLY strict JSON (no fences, no commentary):
-{"keywords": ["...", "...", "..."]}
+{"keywords": ["...", "...", "..."], "article_type": "..."}
 
-- keywords: 3 to 5, each 1-3 words, lowercase, no dupes, primary keyword first."""
+- keywords: 3 to 5, each 1-3 words, lowercase, no dupes, primary keyword first.
+- article_type: one of: news, explainer, how_to, opinion, comparison, benchmark, financial, growth, research.
+  Choose the type that best fits the topic. Prefer specific types (comparison, benchmark, financial, growth, research) when the topic clearly fits.
+  If unsure, use "explainer"."""
 
 _META_SYSTEM = """You are an SEO meta-copy expert. From the topic and keywords provided, write ONE catchy meta title and ONE meta description for the blog post.
 
@@ -297,6 +401,27 @@ class Research:
     topic: str
     keywords: list[str]
     snippets: list[str]
+    source_urls: list[str] | None = None
+    article_type: str = "explainer"
+    profile: Any = None
+    data_availability: Any = None
+
+
+@dataclass(slots=True)
+class KeywordPlan:
+    keywords: list[str]
+    article_type: str
+
+
+@dataclass(slots=True)
+class DataAvailability:
+    numbers: list[str]
+    examples: list[str]
+    named_items: list[str]
+    attributes: list[str]
+    has_chart_data: bool
+    has_table_data: bool
+    summary: str
 
 
 def _utc() -> datetime:
@@ -893,8 +1018,8 @@ async def _research_and_select_topic(
     )
 
 
-async def _keyword_chunk(topic: str, results: list[dict[str, str]]) -> list[str]:
-    """Step 2/6: Nemotron Ultra extracts the top 3-5 SEO keywords.
+async def _keyword_chunk(topic: str, results: list[dict[str, str]]) -> KeywordPlan:
+    """Step 2/6: Nemotron Ultra extracts the top 3-5 SEO keywords + article type.
 
     Heuristic padding (_pad_keywords) keeps the list usable when NIM fails.
     """
@@ -909,16 +1034,172 @@ async def _keyword_chunk(topic: str, results: list[dict[str, str]]) -> list[str]
             temperature=0.3,
             max_tokens=2048,
         )
-        data = ai_service.extract_json(text, prefer="keywords")
-        raw = data.get("keywords") if isinstance(data, dict) else None
-        keywords = _pad_keywords(
-            [str(k) for k in raw] if isinstance(raw, list) else [], topic
-        )
-        print(f"[AutoBlog] keyword extraction OK -> {', '.join(keywords)}")
-        return keywords
+        data = ai_service.extract_json(text, prefer=("keywords", "article_type"))
+        if isinstance(data, dict):
+            raw_keywords = data.get("keywords")
+            keywords = _pad_keywords(
+                [str(k) for k in raw_keywords] if isinstance(raw_keywords, list) else [], topic
+            )
+            article_type = str(data.get("article_type") or "explainer").strip().lower()
+            if article_type not in ARTICLE_TYPES:
+                article_type = "explainer"
+        else:
+            keywords = _pad_keywords([], topic)
+            article_type = "explainer"
+
+        # Heuristic upgrade based on topic text
+        article_type = _upgrade_article_type(topic, article_type)
+        print(f"[AutoBlog] keyword extraction OK -> {', '.join(keywords)} (type: {article_type})")
+        return KeywordPlan(keywords=keywords, article_type=article_type)
     except Exception as exc:  # noqa: BLE001 - heuristics keep the run alive
         print(f"[AutoBlog] keyword extraction failed (Nemotron): {type(exc).__name__}: {exc}")
-        return _pad_keywords([], topic)
+        return KeywordPlan(keywords=_pad_keywords([], topic), article_type="explainer")
+
+
+def _upgrade_article_type(topic: str, article_type: str) -> str:
+    """Upgrade article type based on topic text signals."""
+    topic_lower = topic.lower()
+    # Only upgrade from generic types
+    generic_types = {"news", "explainer", "how_to", "opinion"}
+    if article_type not in generic_types:
+        return article_type
+
+    for target_type, signals in _UPGRADE_SIGNALS.items():
+        if any(signal in topic_lower for signal in signals):
+            return target_type
+    return article_type
+
+
+def _extract_numbers(text: str) -> list[str]:
+    """Extract numeric facts from text with normalization."""
+    # Matches: percentages, currency, scores, large numbers with units, plain numbers
+    patterns = [
+        r"\$[\d,]+\.?\d*\s*(?:billion|million|bn|m|k)?",  # $1.2B, $500M
+        r"[\d,]+\.?\d*\s*(?:billion|million|bn|m|k)\s*(?:dollars?|usd|eur|users?|downloads?)",
+        r"\d+(?:\.\d+)?\s*%",  # 45%, 3.5%
+        r"\d+(?:\.\d+)?\s*(?:out of|/)\s*\d+(?:\.\d+)?",  # 88.7/100, 4.5/5
+        r"\b\d+(?:\.\d+)?\s*(?:points?|score|rating)\b",
+        r"\b(?:19|20)\d{2}\b",  # years
+        r"\b\d+(?:\.\d+)?\s*(?:x|times|fold)\b",
+        r"\bv?\d+(?:\.\d+)+(?:\s*\+\s*\d+(?:\.\d+)?)*\b",  # versions like 3.5.1 or v2.0
+        r"\b\d+(?:,\d{3})+(?:\.\d+)?\b",  # large numbers 1,000,000
+    ]
+    combined = "|".join(patterns)
+    matches = re.findall(combined, text, re.IGNORECASE)
+    # Normalize: remove commas, $ symbols, keep the core number
+    normalized = []
+    for m in matches:
+        clean = m.strip().replace(",", "").replace("$", "")
+        normalized.append(clean)
+    return normalized
+
+
+def _extract_named_items(text: str) -> list[str]:
+    """Extract potential named entities (models, companies, products)."""
+    # Pattern: Capitalized word possibly followed by version/number
+    pattern = r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:\s+(?:v?\d+(?:\.\d+)*))?\b"
+    matches = re.findall(pattern, text)
+    # Filter out common false positives
+    common = {"The", "This", "That", "These", "Those", "Then", "There", "Their", "We", "You", "It", "AI", "API", "URL", "HTTP", "CEO", "CTO"}
+    items = []
+    for m in matches:
+        if m not in common and len(m) > 2:
+            items.append(m)
+    # Also look for known AI model patterns
+    model_matches = re.findall(_AI_MODEL_RE, text, re.IGNORECASE)
+    for m in model_matches:
+        m_clean = " ".join(m.split())
+        if m_clean not in items:
+            items.append(m_clean)
+    # Deduplicate preserving order
+    seen = set()
+    unique = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique[:10]
+
+
+def _extract_attributes(text: str) -> list[str]:
+    """Extract comparison/benchmark attributes from text."""
+    attr_keywords = [
+        "price", "cost", "speed", "latency", "accuracy", "performance",
+        "context", "tokens", "parameters", "benchmark", "throughput",
+        "memory", "storage", "bandwidth", "resolution", "fps", "tps",
+        "revenue", "growth", "market share", "users", "customers",
+        "valuation", "funding", "investment", "profit", "margin",
+        "release date", "launch", "availability", "pricing",
+        "features", "specs", "specifications", "capabilities",
+    ]
+    text_lower = text.lower()
+    found = [attr for attr in attr_keywords if attr in text_lower]
+    return found
+
+
+def _analyze_data_availability(research: Research) -> DataAvailability:
+    """Analyze research snippets for usable data."""
+    full_text = " ".join(research.snippets)
+    numbers = _extract_numbers(full_text)
+    named_items = _extract_named_items(full_text)
+    attributes = _extract_attributes(full_text)
+
+    # Unique numbers (dedupe)
+    unique_numbers = list(dict.fromkeys(numbers))
+    has_chart_data = len(unique_numbers) >= MIN_CHART_NUMBERS
+    has_table_data = len(named_items) >= MIN_TABLE_ENTITIES and len(attributes) >= MIN_TABLE_ATTRIBUTES
+
+    summary_parts = []
+    if unique_numbers:
+        summary_parts.append(f"{len(unique_numbers)} numeric facts")
+    if named_items:
+        summary_parts.append(f"{len(named_items)} named items ({', '.join(named_items[:3])})")
+    if attributes:
+        summary_parts.append(f"{len(attributes)} attributes ({', '.join(attributes[:3])})")
+
+    return DataAvailability(
+        numbers=unique_numbers,
+        examples=unique_numbers[:10],
+        named_items=named_items,
+        attributes=attributes,
+        has_chart_data=has_chart_data,
+        has_table_data=has_table_data,
+        summary="; ".join(summary_parts) if summary_parts else "No structured data found",
+    )
+
+
+def _build_article_profile(article_type: str, topic: str, data: DataAvailability) -> dict[str, Any]:
+    """Build the article profile based on type and data availability."""
+    base = ARTICLE_PROFILES.get(article_type, ARTICLE_PROFILES["explainer"])
+    profile = dict(base)
+
+    # Check if required visuals can be satisfied
+    required = list(profile.get("required_visuals", []))
+    downgraded = False
+    downgrade_reason = ""
+
+    if "table" in required and not data.has_table_data:
+        downgraded = True
+        downgrade_reason = f"Table required but only {len(data.named_items)} items and {len(data.attributes)} attributes found (need ≥{MIN_TABLE_ENTITIES} items and ≥{MIN_TABLE_ATTRIBUTES} attributes)"
+    if "bar" in required and not data.has_chart_data:
+        downgraded = True
+        downgrade_reason = f"Bar chart required but only {len(data.numbers)} numeric facts found (need ≥{MIN_CHART_NUMBERS})"
+    if "line" in required and not data.has_chart_data:
+        downgraded = True
+        downgrade_reason = f"Line chart required but only {len(data.numbers)} numeric facts found (need ≥{MIN_CHART_NUMBERS})"
+
+    if downgraded:
+        profile = dict(ARTICLE_PROFILES["explainer"])
+        profile["downgraded"] = True
+        profile["downgrade_reason"] = downgrade_reason
+        print(f"[AutoBlog] Profile downgraded to explainer: {downgrade_reason}")
+    else:
+        profile["downgraded"] = False
+        profile["downgrade_reason"] = ""
+
+    profile["article_type"] = article_type
+    profile["data"] = data
+    return profile
 
 
 async def _meta_chunk(research: Research) -> tuple[str, str]:

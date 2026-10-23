@@ -254,8 +254,25 @@ def _repair_truncated_json(fragment: str) -> Any | None:
 
 
 def extract_json(text: str, prefer: str | tuple[str, ...] | None = None) -> Any:
+    data, _ = extract_json_with_meta(text, prefer)
+    return data
+
+
+def extract_json_with_meta(
+    text: str, prefer: str | tuple[str, ...] | None = None
+) -> tuple[Any, dict]:
+    """
+    Extract JSON from model response, returning both parsed data and metadata.
+
+    Returns (parsed_data, meta) where meta contains:
+    - "repaired": bool - whether JSON was repaired from truncation
+    - "truncated": bool - whether original response appeared truncated
+    - "raw_length": int - length of raw response text
+    """
     response_text = text or ""
     print("RAW AI RESPONSE FOR PARSING:", response_text[:500])
+
+    meta = {"repaired": False, "truncated": False, "raw_length": len(response_text)}
 
     # 1) Strip markdown fences (```json ... ```) so only content remains.
     cleaned = re.sub(r"```[A-Za-z]*", "", response_text, flags=re.IGNORECASE).strip()
@@ -281,6 +298,8 @@ def extract_json(text: str, prefer: str | tuple[str, ...] | None = None) -> Any:
         if repaired is not None:
             print("JSON REPAIRED FROM TRUNCATED RESPONSE")
             parsed = repaired
+            meta["repaired"] = True
+            meta["truncated"] = True
         else:
             print("JSON REPAIR FAILED. RAW RESPONSE:", response_text)
 
@@ -311,7 +330,7 @@ def extract_json(text: str, prefer: str | tuple[str, ...] | None = None) -> Any:
         raise AIServiceError(
             f"AI returned invalid structure. Raw output: {response_text[:100]}"
         )
-    return parsed
+    return parsed, meta
 
 
 def _has_key(value: Any, key: str | tuple[str, ...]) -> bool:

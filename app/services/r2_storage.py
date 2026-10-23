@@ -1,8 +1,7 @@
-"""Cloudflare R2 storage for durable blog cover images.
+"""Cloudflare R2 storage for durable blog images (covers + content photos).
 
-Pixabay's API returns temporary ``/get/...`` URLs. Covers must be downloaded
-and uploaded to R2 before they are saved to Supabase; in-article images keep
-their existing external URLs.
+Pixabay's API returns temporary ``/get/...`` URLs. Both covers and content photos
+must be downloaded and uploaded to R2 before they are saved to Supabase.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 class R2ImageStorage:
-    """Upload compressed WebP covers to a public Cloudflare R2 bucket."""
+    """Upload compressed WebP images to a public Cloudflare R2 bucket."""
 
     def __init__(self) -> None:
         self._client = None
@@ -68,16 +67,22 @@ class R2ImageStorage:
         )
         return self._client
 
-    def compress_and_upload(self, image_bytes: bytes, slug: str) -> str:
-        """Crop/resize to 1200x630, encode WebP, upload, and return public URL."""
+    def compress_and_upload(self, image_bytes: bytes, slug: str, prefix: str = "covers") -> str:
+        """Crop/resize to 1200x630, encode WebP, upload, and return public URL.
+
+        Args:
+            image_bytes: Raw image bytes to process.
+            slug: Base slug for the filename.
+            prefix: R2 key prefix — "covers" for cover images, "content" for in-article photos.
+        """
         if not image_bytes:
-            raise ValueError("Cannot upload an empty cover image.")
+            raise ValueError("Cannot upload an empty image.")
 
         safe_slug = (
             re.sub(r"[^a-z0-9-]+", "-", (slug or "").lower()).strip("-")[:80]
-            or "cover"
+            or "image"
         )
-        filename = f"covers/{safe_slug}_{uuid.uuid4().hex[:8]}.webp"
+        filename = f"{prefix}/{safe_slug}_{uuid.uuid4().hex[:8]}.webp"
 
         try:
             with Image.open(io.BytesIO(image_bytes)) as source:
@@ -114,7 +119,7 @@ class R2ImageStorage:
             return f"{public_url}/{filename}"
         except Exception as exc:
             print(
-                f"[R2] cover upload failed for {slug!r}: "
+                f"[R2] {prefix} upload failed for {slug!r}: "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
