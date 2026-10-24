@@ -263,10 +263,12 @@ async def write_section(
     # Find matching visual
     visual_info = "(no visual for this section)"
     visual_marker = None
+    visual_intro = ""
     if section.needs_visual and visual_index < len(visual_plan):
         vis = visual_plan[visual_index]
         visual_info = f"Kind: {vis.kind}, Title: {vis.title}, Purpose: {vis.takeaway}"
         visual_marker = f"<!--VISUAL:{visual_index}-->"
+        visual_intro = vis.intro_sentence
 
     prompt = _build_section_prompt(plan, fact_sheet, section, prev_summary, visual_info)
     result = await nemotron_with_gemini_fallback(prompt, "", temperature=0.6, max_tokens=2048)
@@ -276,13 +278,13 @@ async def write_section(
     if not re.search(r"<h[23][^>]*>", html):
         html = f"<h2>{section.heading}</h2>\n{html}"
 
-    # Insert visual marker if not present
-    if visual_marker and visual_marker not in html:
-        # Insert after first paragraph
+    # Insert visual intro sentence and marker if present
+    if visual_marker:
+        intro_html = f"<p>{visual_intro}</p>\n" if visual_intro else ""
         if "</p>" in html:
-            html = html.replace("</p>", f"</p>\n{visual_marker}", 1)
+            html = html.replace("</p>", f"</p>\n{intro_html}{visual_marker}", 1)
         else:
-            html = f"{html}\n{visual_marker}"
+            html = f"{html}\n{intro_html}{visual_marker}"
 
     words = _word_count(html)
     # Check word count - if way off, rewrite once
@@ -291,6 +293,17 @@ async def write_section(
         rewrite_prompt = prompt + f"\n\nPREVIOUS ATTEMPT WAS {words} WORDS (budget {section.word_budget}). REWRITE to hit the budget."
         result = await nemotron_with_gemini_fallback(rewrite_prompt, "", temperature=0.5, max_tokens=2048)
         html = result.text.strip()
+
+        # Re-insert visual marker after rewrite
+        if visual_marker and visual_marker not in html:
+            intro_html = f"<p>{visual_intro}</p>\n" if visual_intro else ""
+            if "</p>" in html:
+                html = html.replace("</p>", f"</p>\n{intro_html}{visual_marker}", 1)
+            else:
+                html = f"{html}\n{intro_html}{visual_marker}"
+
+        words = _word_count(html)
+    else:
         words = _word_count(html)
 
     return WrittenSection(

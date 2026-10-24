@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +15,9 @@ from app.autoblog.llm.clients import (
     BlogPipelineError,
 )
 from app.autoblog.sources import fetch_recent_posts
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Data Classes ─────────────────────────────────────────────────────────────
@@ -34,7 +38,9 @@ class VisualPlan:
     title: str
     caption: str
     columns: list[str] | None = None  # for tables
+    rows: list[list[str]] | None = None  # for tables
     labels: list[str] | None = None  # for charts
+    values: list[float | int] | None = None  # for charts
     unit: str | None = None
     source_url: str = ""
     intro_sentence: str = ""
@@ -154,11 +160,18 @@ def _get_recent_domains(limit: int = 60) -> list[str]:
         return []
 
 
-def _build_planner_prompt(fact_sheet: dict[str, Any], recent_domains: list[str]) -> str:
-    claims = fact_sheet.get("claims", [])
-    numbers = fact_sheet.get("numbers", [])
-    entities = fact_sheet.get("entities", [])
-    source_urls = fact_sheet.get("source_urls", [])
+def _build_planner_prompt(fact_sheet: dict[str, Any] | Any, recent_domains: list[str]) -> str:
+    # Support both dict and FactSheet dataclass
+    if hasattr(fact_sheet, "claims"):
+        claims = fact_sheet.claims
+        numbers = fact_sheet.numbers
+        entities = fact_sheet.entities
+        source_urls = fact_sheet.source_urls
+    else:
+        claims = fact_sheet.get("claims", [])
+        numbers = fact_sheet.get("numbers", [])
+        entities = fact_sheet.get("entities", [])
+        source_urls = fact_sheet.get("source_urls", [])
 
     claims_text = "\n".join(f"- {c}" for c in claims[:20]) or "(none)"
     numbers_text = "\n".join(f"- {n}" for n in numbers[:30]) or "(none)"
@@ -186,7 +199,7 @@ RECENT POST DOMAINS/KEYWORDS (avoid these for variety):
 Plan the article now."""
 
 
-async def create_article_plan(fact_sheet: dict[str, Any]) -> ArticlePlan:
+async def create_article_plan(fact_sheet: Any) -> ArticlePlan:
     """Run editor-planner (Nemotron -> Gemini fallback)."""
     recent_domains = await asyncio.to_thread(_get_recent_domains, 60)
     prompt = _build_planner_prompt(fact_sheet, recent_domains)
@@ -222,7 +235,9 @@ async def create_article_plan(fact_sheet: dict[str, Any]) -> ArticlePlan:
             title=str(vis.get("title", "")).strip(),
             caption=str(vis.get("caption", "")).strip(),
             columns=vis.get("columns") if isinstance(vis.get("columns"), list) else None,
+            rows=vis.get("rows") if isinstance(vis.get("rows"), list) else None,
             labels=vis.get("labels") if isinstance(vis.get("labels"), list) else None,
+            values=vis.get("values") if isinstance(vis.get("values"), list) else None,
             unit=str(vis.get("unit", "")).strip() or None,
             source_url=str(vis.get("source_url", "")).strip(),
             intro_sentence=str(vis.get("intro_sentence", "")).strip(),

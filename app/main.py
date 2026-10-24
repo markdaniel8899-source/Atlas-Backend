@@ -146,12 +146,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(autoblog_router)
     app.include_router(blog.router)
     app.include_router(chat.router)
     app.include_router(quizzes.router)
     app.include_router(roadmaps.router)
     app.include_router(gamification.router)
-    app.include_router(autoblog_router)
 
     @app.exception_handler(ai_service.AIServiceError)
     async def handle_ai_error(
