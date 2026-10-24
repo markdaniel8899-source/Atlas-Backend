@@ -86,7 +86,7 @@ from app import ai_service
 from app.cache import clear_all as clear_read_caches
 from app.config import get_settings
 from app.plugins.seo_checker import evaluate_seo_lightweight
-from app.services.blog_content_gate import evaluate_article, GateResult
+# from app.services.blog_content_gate import evaluate_article, GateResult
 from app.services.blog_visuals import (
     render_visual,
     replace_visual_markers,
