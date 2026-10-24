@@ -15,6 +15,8 @@ from app import ai_service
 from app.config import get_settings
 from app.deps import fetch_profile_role, verify_bearer_token
 from app.routers import blog, chat, gamification, quizzes, roadmaps
+from app.autoblog.scheduler import setup_scheduler, shutdown_scheduler
+from app.autoblog.routes import router as autoblog_router
 
 # Background-task logs go to stdout (the nohup log). A non-tty stdout is
 # block-buffered, so those prints never appeared next to uvicorn's 202 line.
@@ -118,8 +120,10 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # No Auto Blog scheduler in the new pipeline (will be added in STEP B)
+        # AutoBlog v2 scheduler
+        setup_scheduler(app)
         yield
+        shutdown_scheduler(app)
 
     app = FastAPI(
         title="ATLAS AI Service",
@@ -147,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(quizzes.router)
     app.include_router(roadmaps.router)
     app.include_router(gamification.router)
+    app.include_router(autoblog_router)
 
     @app.exception_handler(ai_service.AIServiceError)
     async def handle_ai_error(
