@@ -1,296 +1,474 @@
-"""Writer module for AutoBlog v2 - Article and Meta generation."""
+"""Writer for AutoBlog v2 - Section-by-section article generation."""
 
 from __future__ import annotations
 
 import asyncio
-import random
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.autoblog.config.settings import get_autoblog_settings
 from app.autoblog.llm.clients import (
-    groq_with_gemini_fallback,
+    nemotron_with_gemini_fallback,
+    gemini_final_pass,
     extract_json,
     BlogPipelineError,
 )
-from app.autoblog.planner import ARTICLE_PROFILES
+from app.autoblog.planner import ArticlePlan, SectionPlan, VisualPlan, ImagePlan
+from app.autoblog.research import FactSheet
+
+
+# ─── Data Classes ─────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class WrittenSection:
+    heading: str
+    html: str
+    word_count: int
+    visual_marker: str | None = None  # e.g. "<!--VISUAL:0-->"
+
+
+@dataclass(slots=True)
+class ArticleDraft:
+    title: str
+    excerpt: str
+    sections: list[WrittenSection]
+    faq_html: str
+    tags: list[str]
+    visuals: list[dict[str, Any]]  # rendered visual data for visual_plan
+    word_count: int
 
 
 # ─── System Prompts ───────────────────────────────────────────────────────────
 
 
-_WRITER_SYSTEM = """You are an expert tech journalist and industry analyst writing for ATLAS, a learning OS for students. Your articles are published on our public blog and must be citable by both Google and AI assistants.
+_SECTION_WRITER_SYSTEM = """You are an expert tech journalist writing ONE section of an article for ATLAS (learning OS for students).
 
-STRICT SEO, AEO, & GEO REQUIREMENTS (MUST FOLLOW):
+CONTEXT:
+- Topic: {topic}
+- Angle: {angle}
+- Tone: {tone} (analytical/conversational/authoritative/investigative)
+- Article Type: {article_type}
+- Target Audience: Students learning tech/AI
+- Primary Keyword: {primary_keyword} (must appear naturally)
+- Secondary Keywords: {secondary_keywords}
+- Word Budget for THIS section: {word_budget}
+- Previous Sections Summary: {prev_summary}
 
-1. DIRECT ANSWER FIRST (AEO):
-   - Answer the core user query directly within the first 2 sentences of the introduction.
-   - Never open with fluff such as "In today's fast-paced world" or a long wind-up.
+FACT SHEET (you may ONLY use these facts, must link 2-4 source URLs inline):
+{claims}
+{numbers}
+{entities}
+Source URLs: {source_urls}
 
-2. STRUCTURE & READABILITY:
-   - Use proper HTML tags: <h2>, <h3>, <p>, <ul>, <li>, <strong>, and <table> only when the topic calls for it.
-   - Keep paragraphs short (1-3 sentences).
-   - Use bullet points for features, steps, or comparisons. At least one bullet list per article.
-   - Write 3-5 body sections, each opened by an engaging <h2>; use <h3> where it helps.
+VISUAL FOR THIS SECTION: {visual_info}
 
-3. DYNAMIC FORMATTING & VISUALS (Context-Aware):
-   - Analyze the nature of the topic and choose the format that informs best. Never force a table into an article where it does not fit.
-   - Theoretical, conceptual, or opinion topics: use narrative paragraphs and bullets; do NOT use a <table>.
-   - Research, data, or statistics-heavy topics: MUST include one HTML <table> with <thead>, <tbody>, <tr>, <th> and <td>, plus a one-sentence introduction before it.
-   - Comparison or "versus" topics: MUST include one comparison <table> (features, pros and cons, benchmarks) plus a short bullet summary.
-   - Visuals: the publishing pipeline places 1-3 highly relevant images automatically, including a conceptual image mid-article. Do NOT output <img> tags, placeholders, or image URLs; just keep the middle sections visual-friendly.
-   - Every <h2> and <h3> must be unique and descriptive. Never repeat the same heading text, and never restate a heading's wording as plain text directly beneath it.
+SECTION TO WRITE:
+Heading: {heading}
+Purpose: {purpose}
 
-4. KEYWORD DENSITY (SEO):
-   - Naturally include the exact primary keyword 5-7 times. Never stuff.
-   - Include it in the first 100 words, in at least one <h2> heading, and in the closing section.
-   - Use semantic/LSI keywords related to the topic naturally.
-
-5. AUTHORITY & CITATIONS (GEO):
-   - Cite primary sources naturally in the text (for example, "According to the official documentation..." or "As announced by...").
-   - Link 2-3 of the supplied source URLs inline with <a href="..." rel="noopener">.
-   - Ground every claim in the research provided. If unsure about a statistic, phrase it generally. Never invent studies or numbers.
-   - Maintain an objective, expert, professional tone. E-E-A-T compliant.
-
-6. MANDATORY FAQ SECTION (AEO):
-   - At the very end of the article, add an <h2>FAQ</h2> section.
-   - Include exactly 3-4 specific, long-tail questions related to the topic, each followed by a concise, direct answer of 40-60 words.
-   - Format: <h3>Question?</h3><p>Direct, clear answer.</p>
-
-7. LENGTH:
-   - Write between 900 and 1200 words for comprehensive coverage.
-
-VOICE & OUTPUT RULES:
-- Write like a sharp, authoritative tech journalist: contractions, direct "you", specific examples. A human wrote this.
-- BANNED words and phrases (using any of them fails the brief): delve, delve into, moreover, furthermore, in conclusion, additionally, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, testament to, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm.
-- Never use em dashes (—) or en dashes (–) anywhere in the title, excerpt or body. Use commas, colons or parentheses instead.
-- The content_html value is a plain HTML fragment: never <html>, <head> or <body>. The article must end with the FAQ section.
-
-Return ONLY strict JSON (no markdown fences, no commentary before or after):
-{"title": "...", "excerpt": "...", "content_html": "...", "tags": ["...", "..."], "visuals": [...]}
-
-- title: max 110 chars, specific and engaging, contains the primary keyword, no clickbait lies.
-- excerpt: 130-155 chars of plain text containing the primary keyword (used as the meta description).
-- content_html: the full article body as an HTML fragment, ending with the FAQ section.
-- tags: 3-5 lowercase topic tags.
-- visuals: array of structured visuals. Each visual is an object:
-  * For tables: {"kind": "table", "title": "...", "caption": "...", "columns": ["...", "..."], "rows": [["...", "..."], ...], "source_url": "...", "intro_sentence": "...", "takeaway": "..."}
-  * For charts: {"kind": "bar"|"line", "title": "...", "caption": "...", "unit": "...", "labels": ["...", "..."], "values": [number, ...], "source_url": "...", "intro_sentence": "...", "takeaway": "..."}
-Rules for visuals: use ONLY numbers/facts present in the supplied research. 3-8 data points (charts), 2-6 rows (tables). Every visual needs intro_sentence (a sentence that points to it and says why it matters, e.g. "The chart below shows how X grew from A to B.") and takeaway (one or two sentences interpreting what the reader should conclude, not repeating the numbers). If the research has no usable data, return "visuals": [].
-The content_html must contain the marker <!--VISUAL:0--> (and <!--VISUAL:1--> if two) at the exact spot where each visual belongs, directly after a paragraph that sets it up. Do not write <img>, <svg> or tables for visuals yourself.
-
-Tables that are simple parts of the prose may still be written as <table>; structured visuals is for the data ones."""
+RULES:
+- Write ONLY this section's HTML content (no <h1>, no full article wrapper)
+- Start with the heading as <h2> or <h3> as appropriate
+- Word count MUST be close to word_budget (±20%)
+- Include the primary keyword naturally at least once if not used yet
+- Use short paragraphs (1-3 sentences), bullet points where helpful
+- If visual_info provided, include the marker <!--VISUAL:n--> right after the paragraph that sets it up
+- Link 1-2 source URLs inline with <a href="..." rel="noopener">anchor text</a>
+- Ground every claim in the fact sheet. Never invent numbers, studies, or quotes.
+- Tone: {tone}. BANNED words: delve, delve into, moreover, furthermore, in conclusion, additionally, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, testament to, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm.
+- NO em dashes (—) or en dashes (–). Use commas, colons, or parentheses.
+- Return ONLY the HTML fragment for this section."""
 
 
-_META_SYSTEM = """You are an SEO meta-copy expert. From the topic and keywords provided, write ONE catchy meta title and ONE meta description for the blog post.
+_INTRO_WRITER_SYSTEM = """You are an expert tech journalist writing the INTRODUCTION of an article for ATLAS.
 
-Return ONLY strict JSON (no fences, no commentary):
-{"meta_title": "...", "meta_description": "..."}
+CONTEXT:
+- Topic: {topic}
+- Angle: {angle}
+- Tone: {tone}
+- Article Type: {article_type}
+- Primary Keyword: {primary_keyword} (MUST appear in first 100 words)
+- Word Budget: {word_budget}
+- Target Audience: Students learning tech/AI
 
-- meta_title: catchy and specific, max 110 chars, MUST contain the exact primary keyword supplied by the user, may include a number or power word.
-- meta_description: 130-155 chars (never below 120 or above 160), MUST contain the primary keyword, entices a click. Plain text only.
-- No em dashes (—) or en dashes (–); use commas or colons instead."""
+FACT SHEET (you may ONLY use these facts):
+{claims}
+{numbers}
+{entities}
+Source URLs: {source_urls}
 
-
-_TOPIC_SYSTEM = """You are an SEO trend analyst for ATLAS, a learning OS for students.
-From the research snippets, pick ONE specific, currently trending, searchable blog topic (not a generic pillar term).
-
-Return ONLY strict JSON (no fences, no commentary):
-{"topic": "..."}
-
-- topic: a concrete angle a reader would click, max 120 chars.
-- Prefer a specific model, company, research paper, or measurable news event over generic advice.
-- Never repeat an angle from the recently published posts supplied in the prompt."""
-
-
-_KEYWORD_SYSTEM = """You are an SEO content strategist for ATLAS, a learning OS for students.
-Extract the top 3 to 5 SEO keywords for the given blog topic.
-
-Return ONLY strict JSON (no fences, no commentary):
-{"keywords": ["...", "...", "..."], "article_type": "..."}
-
-- keywords: 3 to 5, each 1-3 words, lowercase, no dupes, primary keyword first.
-- article_type: one of: news, explainer, how_to, opinion, comparison, benchmark, financial, growth, research.
-  Choose the type that best fits the topic. Prefer specific types (comparison, benchmark, financial, growth, research) when the topic clearly fits.
-  If unsure, use "explainer"."""
+RULES:
+- Write the introduction HTML (no heading, just paragraphs)
+- Answer the reader's core question DIRECTLY in the first 2 sentences (AEO)
+- Include primary keyword in first 100 words
+- Word count close to word_budget (±20%)
+- Link 1-2 source URLs inline
+- NO banned words, NO em/en dashes
+- Return ONLY the intro HTML fragment (paragraphs only)."""
 
 
-# ─── Article Writing ──────────────────────────────────────────────────────────
+_CONCLUSION_WRITER_SYSTEM = """You are an expert tech journalist writing the CONCLUSION of an article for ATLAS.
+
+CONTEXT:
+- Topic: {topic}
+- Angle: {angle}
+- Tone: {tone}
+- Primary Keyword: {primary_keyword} (MUST appear once in closing)
+- Word Budget: {word_budget}
+- Article Summary: {article_summary}
+
+RULES:
+- Write conclusion HTML (start with <h2>Conclusion</h2> or similar)
+- Summarize key takeaway in 1-2 paragraphs
+- Include primary keyword once naturally
+- Word count close to word_budget (±20%)
+- End with a forward-looking or actionable statement
+- NO banned words, NO em/en dashes
+- Return ONLY the conclusion HTML fragment."""
 
 
-async def write_article(
-    research_topic: str,
-    primary_keyword: str,
-    secondary_keywords: str,
-    sources: str,
-    seo_feedback: str | None = None,
-    profile: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Write the article via Groq (Gemini fallback on 429/5xx)."""
-    user_prompt = (
-        f"Trending topic: {research_topic}\n"
-        f"Primary keyword: {primary_keyword}\n"
-        f"Secondary keywords (weave in naturally): {secondary_keywords}\n"
-        f"Today's research (ground the article in these, link 2-3 inline):\n"
-        f"{sources}\n\n"
-        "Write the article now. Open by answering the reader's core question "
-        "directly in the first 2 sentences, with no wind-up. Include the exact "
-        "primary keyword 5-7 times naturally, plus once in the first 100 words, "
-        "once in an <h2>, and once in the closing section. Use short paragraphs "
-        "(1-3 sentences), at least one <ul><li> list, and 3-5 body sections. "
-        "End with a mandatory <h2>FAQ</h2> section containing exactly 3-4 "
-        "<h3>questions</h3>, each answered in 40-60 words. Target 800-1200 "
-        "words. Banned words fail the brief. Write in simple, human-like "
-        "language. 100% unique, no plagiarism."
-    )
-    if profile:
-        required = profile.get("required_visuals", ())
-        if required:
-            visual_hint = ", ".join(required)
-            user_prompt += (
-                f"\n\nThe article profile requires these structured visuals: {visual_hint}. "
-                "If the research contains relevant data, include them in the 'visuals' array. "
-                "Place <!--VISUAL:0--> marker in content_html after the paragraph that sets up each visual."
-            )
-        max_visuals = profile.get("max_visuals", 1)
-        if max_visuals:
-            user_prompt += f" Maximum {max_visuals} structured visual(s)."
+_FAQ_WRITER_SYSTEM = """You are an expert tech journalist writing the FAQ section for ATLAS.
 
-    if seo_feedback:
-        user_prompt += (
-            "\n\nIMPORTANT: a lightweight SEO checker rejected your previous "
-            f"draft. Fix ALL of these issues in this rewrite:\n- {seo_feedback}\n"
-            "Keep the same topic, keywords and research; make the fixes "
-            "minimally and keep the article between 800 and 1200 words. Keep "
-            "the direct 2-sentence opening, 5-7 uses of the primary keyword, "
-            "and the final <h2>FAQ</h2> section with 3-4 Q&A pairs."
-        )
+CONTEXT:
+- Topic: {topic}
+- Primary Keyword: {primary_keyword}
+- Article Type: {article_type}
+- Key Facts: {claims}
 
-    text = await groq_with_gemini_fallback(
-        _WRITER_SYSTEM, user_prompt, temperature=0.8, max_tokens=4096
-    )
+RULES:
+- Write FAQ HTML starting with <h2>FAQ</h2>
+- Exactly 3-4 questions, each as <h3>Question?</h3><p>Answer.</p>
+- Questions must be specific, long-tail (what students would actually search)
+- Answers: 40-60 words each, direct and clear
+- Include primary keyword in at least one answer
+- NO banned words, NO em/en dashes
+- Return ONLY the FAQ HTML fragment."""
 
-    result = extract_json(text)
-    data = result.data
-    if not isinstance(data, dict):
-        raise BlogPipelineError("Article JSON was not an object.")
 
-    content_html = str(data.get("content_html") or data.get("content") or "").strip()
-    if not content_html:
-        raise BlogPipelineError("Article had no content_html.")
+_META_FINAL_SYSTEM = """You are an SEO meta-copy expert. Write the final meta title, meta description, excerpt, and 3-5 tags.
 
-    title = str(data.get("title") or "").strip()[:300] or research_topic[:300]
-    plain = re.sub(r"<[^>]+>", " ", content_html)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    excerpt = str(data.get("excerpt") or "").strip() or plain[:170].rstrip() + "..."
+CONTEXT:
+- Topic: {topic}
+- Article Title: {title}
+- Primary Keyword: {primary_keyword}
+- Secondary Keywords: {secondary_keywords}
+- Article Summary: {summary}
+- Word Count: {word_count}
 
-    tags_raw = data.get("tags")
-    tags = (
-        [str(t).strip().lower() for t in tags_raw if str(t).strip()]
-        if isinstance(tags_raw, list)
-        else []
-    )
-    seen: list[str] = []
-    for tag in tags:
-        if tag not in seen:
-            seen.append(tag)
-    tags = seen[:5]
+Return ONLY strict JSON:
+{{
+  "meta_title": "...",       // max 110 chars, contains primary keyword, catchy
+  "meta_description": "...", // 130-155 chars, contains primary keyword
+  "excerpt": "...",          // 130-155 chars plain text, contains primary keyword
+  "tags": ["...", "..."]     // 3-5 lowercase tags
+}}"""
 
-    visuals_raw = data.get("visuals")
-    visuals = (
-        visuals_raw
-        if isinstance(visuals_raw, list)
-        else []
-    )
 
-    words = len(plain.split())
-    if words < 500:
-        print(f"[AutoBlog] WARNING - article is only {words} words (target ~1000)")
-    else:
-        print(f"[AutoBlog] article written - {words} words")
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
+
+def _word_count(html_text: str) -> int:
+    return len(re.sub(r"<[^>]+>", " ", html_text).split())
+
+
+def _format_fact_sheet(fact_sheet: FactSheet) -> dict[str, str]:
+    claims_text = "\n".join(f"- {c}" for c in fact_sheet.claims[:15]) or "(none)"
+    numbers_text = "\n".join(
+        f"- {n['value']} {n['unit']}: {n['context']} (source: {n['source_url']})"
+        for n in fact_sheet.numbers[:20]
+    ) or "(none)"
+    entities_text = "\n".join(
+        f"- {e['name']} ({e['type']}): {e['context']} (source: {e['source_url']})"
+        for e in fact_sheet.entities[:15]
+    ) or "(none)"
+    sources_text = "\n".join(f"- {u}" for u in fact_sheet.source_urls[:10]) or "(none)"
     return {
-        "title": title,
-        "excerpt": excerpt,
-        "content_html": content_html,
-        "tags": tags,
-        "visuals": visuals,
-        "_json_meta": {"repaired": result.repaired},
+        "claims": claims_text,
+        "numbers": numbers_text,
+        "entities": entities_text,
+        "source_urls": sources_text,
     }
 
 
-# ─── Meta Generation ──────────────────────────────────────────────────────────
+def _build_section_prompt(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+    section: SectionPlan,
+    prev_summary: str,
+    visual_info: str,
+) -> str:
+    fs = _format_fact_sheet(fact_sheet)
+    secondary = ", ".join(plan.secondary_keywords) if plan.secondary_keywords else "(none)"
+    return _SECTION_WRITER_SYSTEM.format(
+        topic=plan.topic,
+        angle=plan.angle,
+        tone=plan.tone,
+        article_type=plan.article_type,
+        primary_keyword=plan.primary_keyword,
+        secondary_keywords=secondary,
+        word_budget=section.word_budget,
+        prev_summary=prev_summary or "(this is the first body section)",
+        claims=fs["claims"],
+        numbers=fs["numbers"],
+        entities=fs["entities"],
+        source_urls=fs["source_urls"],
+        visual_info=visual_info or "(no visual for this section)",
+        heading=section.heading,
+        purpose=section.purpose,
+    )
 
 
-async def generate_meta(
-    topic: str,
-    primary_keyword: str,
-    other_keywords: str,
-    sources: str,
-) -> tuple[str, str]:
-    """Generate meta title and description via Groq (Gemini fallback)."""
-    try:
-        text = await groq_with_gemini_fallback(
-            _META_SYSTEM,
-            f"Topic: {topic}\n"
-            f"Primary keyword: {primary_keyword}\n"
-            f"Other keywords: {other_keywords}\n"
-            f"Research snippets:\n{sources}",
-            temperature=0.7,
-            max_tokens=1024,
+# ─── Section Writers ──────────────────────────────────────────────────────────
+
+
+async def write_intro(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+    intro_budget: int,
+) -> str:
+    """Write the introduction (no heading, direct answer first)."""
+    fs = _format_fact_sheet(fact_sheet)
+    secondary = ", ".join(plan.secondary_keywords) if plan.secondary_keywords else "(none)"
+    prompt = _INTRO_WRITER_SYSTEM.format(
+        topic=plan.topic,
+        angle=plan.angle,
+        tone=plan.tone,
+        article_type=plan.article_type,
+        primary_keyword=plan.primary_keyword,
+        secondary_keywords=secondary,
+        word_budget=intro_budget,
+        claims=fs["claims"],
+        numbers=fs["numbers"],
+        entities=fs["entities"],
+        source_urls=fs["source_urls"],
+    )
+    result = await nemotron_with_gemini_fallback(prompt, "", temperature=0.5, max_tokens=1024)
+    html = result.text.strip()
+    # Ensure no heading in intro
+    html = re.sub(r"^<h[1-6][^>]*>.*?</h[1-6]>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    return html
+
+
+async def write_section(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+    section: SectionPlan,
+    prev_summary: str,
+    visual_plan: list[VisualPlan],
+    visual_index: int,
+) -> WrittenSection:
+    """Write one body section."""
+    # Find matching visual
+    visual_info = "(no visual for this section)"
+    visual_marker = None
+    if section.needs_visual and visual_index < len(visual_plan):
+        vis = visual_plan[visual_index]
+        visual_info = f"Kind: {vis.kind}, Title: {vis.title}, Purpose: {vis.takeaway}"
+        visual_marker = f"<!--VISUAL:{visual_index}-->"
+
+    prompt = _build_section_prompt(plan, fact_sheet, section, prev_summary, visual_info)
+    result = await nemotron_with_gemini_fallback(prompt, "", temperature=0.6, max_tokens=2048)
+    html = result.text.strip()
+
+    # Ensure heading is present
+    if not re.search(r"<h[23][^>]*>", html):
+        html = f"<h2>{section.heading}</h2>\n{html}"
+
+    # Insert visual marker if not present
+    if visual_marker and visual_marker not in html:
+        # Insert after first paragraph
+        if "</p>" in html:
+            html = html.replace("</p>", f"</p>\n{visual_marker}", 1)
+        else:
+            html = f"{html}\n{visual_marker}"
+
+    words = _word_count(html)
+    # Check word count - if way off, rewrite once
+    if words < section.word_budget * 0.6 or words > section.word_budget * 1.5:
+        print(f"[AutoBlog] Section '{section.heading}' {words} words (budget {section.word_budget}) - rewriting...", flush=True)
+        rewrite_prompt = prompt + f"\n\nPREVIOUS ATTEMPT WAS {words} WORDS (budget {section.word_budget}). REWRITE to hit the budget."
+        result = await nemotron_with_gemini_fallback(rewrite_prompt, "", temperature=0.5, max_tokens=2048)
+        html = result.text.strip()
+        words = _word_count(html)
+
+    return WrittenSection(
+        heading=section.heading,
+        html=html,
+        word_count=words,
+        visual_marker=visual_marker,
+    )
+
+
+async def write_conclusion(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+    article_summary: str,
+    conclusion_budget: int,
+) -> str:
+    """Write the conclusion."""
+    fs = _format_fact_sheet(fact_sheet)
+    prompt = _CONCLUSION_WRITER_SYSTEM.format(
+        topic=plan.topic,
+        angle=plan.angle,
+        tone=plan.tone,
+        primary_keyword=plan.primary_keyword,
+        word_budget=conclusion_budget,
+        article_summary=article_summary,
+        claims=fs["claims"],
+        numbers=fs["numbers"],
+        entities=fs["entities"],
+    )
+    result = await nemotron_with_gemini_fallback(prompt, "", temperature=0.5, max_tokens=1024)
+    return result.text.strip()
+
+
+async def write_faq(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+) -> str:
+    """Write the FAQ section."""
+    fs = _format_fact_sheet(fact_sheet)
+    prompt = _FAQ_WRITER_SYSTEM.format(
+        topic=plan.topic,
+        primary_keyword=plan.primary_keyword,
+        article_type=plan.article_type,
+        claims=fs["claims"],
+    )
+    result = await nemotron_with_gemini_fallback(prompt, "", temperature=0.4, max_tokens=1024)
+    html = result.text.strip()
+
+    # Validate FAQ structure
+    faq_count = len(re.findall(r"<h3[^>]*>.*?</h3>", html, re.IGNORECASE | re.DOTALL))
+    if faq_count < 3 or faq_count > 4:
+        # Fallback: rewrite with strict instruction
+        retry_prompt = prompt + f"\n\nPREVIOUS ATTEMPT HAD {faq_count} QUESTIONS. YOU MUST WRITE EXACTLY 3-4 <h3>QUESTION?</h3><p>ANSWER</p> PAIRS."
+        result = await gemini_final_pass(retry_prompt, "", temperature=0.3, max_tokens=1024)
+        html = result.text.strip()
+
+    return html
+
+
+async def finalize_meta(
+    plan: ArticlePlan,
+    article_title: str,
+    article_summary: str,
+    word_count: int,
+) -> dict[str, Any]:
+    """Final pass for meta title, description, excerpt, tags (Gemini)."""
+    secondary = ", ".join(plan.secondary_keywords) if plan.secondary_keywords else "(none)"
+    prompt = _META_FINAL_SYSTEM.format(
+        topic=plan.topic,
+        title=article_title,
+        primary_keyword=plan.primary_keyword,
+        secondary_keywords=secondary,
+        summary=article_summary[:500],
+        word_count=word_count,
+    )
+    result = await gemini_final_pass(prompt, "", temperature=0.3, max_tokens=1024)
+    parsed = extract_json(result.text)
+    data = parsed.data
+    if not isinstance(data, dict):
+        raise BlogPipelineError("Meta final pass returned invalid JSON.")
+
+    meta_title = str(data.get("meta_title", "")).strip()[:110] or article_title[:110]
+    meta_description = str(data.get("meta_description", "")).strip()
+    excerpt = str(data.get("excerpt", "")).strip()
+    tags = [str(t).strip().lower() for t in data.get("tags", []) if str(t).strip()][:5]
+
+    # Ensure primary keyword in meta fields
+    if plan.primary_keyword.lower() not in meta_title.lower():
+        meta_title = f"{meta_title}: {plan.primary_keyword}"[:110]
+    if plan.primary_keyword.lower() not in meta_description.lower():
+        meta_description = f"{meta_description} {plan.primary_keyword}"[:160]
+    if plan.primary_keyword.lower() not in excerpt.lower():
+        excerpt = f"{excerpt} {plan.primary_keyword}"[:160]
+
+    return {
+        "meta_title": meta_title,
+        "meta_description": meta_description,
+        "excerpt": excerpt,
+        "tags": tags,
+    }
+
+
+# ─── Main Assembly ────────────────────────────────────────────────────────────
+
+
+async def write_article(
+    plan: ArticlePlan,
+    fact_sheet: FactSheet,
+) -> ArticleDraft:
+    """Write full article section by section, then finalize meta."""
+    # Budget allocation: intro ~150, sections per plan, conclusion ~100, FAQ ~200
+    intro_budget = 150
+    conclusion_budget = 100
+
+    print(f"[AutoBlog] Writing intro (budget {intro_budget})...", flush=True)
+    intro_html = await write_intro(plan, fact_sheet, intro_budget)
+
+    print(f"[AutoBlog] Writing {len(plan.outline)} body sections...", flush=True)
+    sections: list[WrittenSection] = []
+    prev_summaries: list[str] = []
+    visual_index = 0
+
+    for i, section in enumerate(plan.outline):
+        prev_summary = " ".join(prev_summaries[-2:]) if prev_summaries else ""
+        written = await write_section(
+            plan, fact_sheet, section, prev_summary, plan.visual_plan, visual_index
         )
-        result = extract_json(text)
-        data = result.data
-        if isinstance(data, dict):
-            title = str(data.get("meta_title") or "").strip()
-            description = str(data.get("meta_description") or "").strip()
-            if title and description:
-                return title[:300], description[:300]
-        print("[AutoBlog] meta chunk returned incomplete JSON - using fallbacks.")
-    except Exception as exc:
-        print(f"[AutoBlog] meta generation failed (Groq/Gemini): {type(exc).__name__}: {exc}")
+        sections.append(written)
+        prev_summaries.append(f"{section.heading}: {written.html[:200]}")
+        if written.visual_marker:
+            visual_index += 1
+        print(f"[AutoBlog] Section {i+1}/{len(plan.outline)}: '{section.heading}' - {written.word_count} words", flush=True)
 
-    fallback_desc = sources[:170].rstrip() + "..." if sources else topic
-    fallback_title = topic
-    if primary_keyword and primary_keyword.lower() not in fallback_title.lower():
-        fallback_title = f"{fallback_title}: {primary_keyword}"
-    return fallback_title[:300], fallback_desc
+    print(f"[AutoBlog] Writing conclusion (budget {conclusion_budget})...", flush=True)
+    article_summary = intro_html + " " + " ".join(s.html for s in sections)
+    conclusion_html = await write_conclusion(plan, fact_sheet, article_summary, conclusion_budget)
+
+    print("[AutoBlog] Writing FAQ...", flush=True)
+    faq_html = await write_faq(plan, fact_sheet)
+
+    # Assemble full content
+    all_sections_html = "\n".join(s.html for s in sections)
+    content_html = f"{intro_html}\n{all_sections_html}\n{conclusion_html}\n{faq_html}"
+
+    # Final meta pass
+    print("[AutoBlog] Final meta pass...", flush=True)
+    meta = await finalize_meta(plan, plan.topic, article_summary, _word_count(content_html))
+
+    # Collect visuals data for rendering
+    visuals_data = []
+    for vis in plan.visual_plan:
+        visuals_data.append({
+            "kind": vis.kind,
+            "title": vis.title,
+            "caption": vis.caption,
+            "columns": vis.columns,
+            "labels": vis.labels,
+            "unit": vis.unit,
+            "source_url": vis.source_url,
+            "intro_sentence": vis.intro_sentence,
+            "takeaway": vis.takeaway,
+        })
+
+    return ArticleDraft(
+        title=meta["meta_title"],
+        excerpt=meta["excerpt"],
+        sections=sections,
+        faq_html=faq_html,
+        tags=meta["tags"],
+        visuals=visuals_data,
+        word_count=_word_count(content_html),
+    )
 
 
-# ─── Keyword Extraction (Nemotron) ────────────────────────────────────────────
+# ─── Exports ──────────────────────────────────────────────────────────────────
 
-
-async def extract_keywords_nim(
-    topic: str, snippets: list[str]
-) -> tuple[list[str], str]:
-    """Extract keywords and article type using Nemotron Ultra."""
-    blob = "\n".join(
-        f"- {s['title']} ({s['url']}): {s['content'][:500]}"
-        for s in snippets
-    ) or "(no research snippets)"
-    try:
-        text = await nim_chat(
-            _KEYWORD_SYSTEM,
-            f"Topic: {topic}\nResearch snippets:\n{blob}",
-            temperature=0.3,
-            max_tokens=2048,
-        )
-        result = extract_json(text, prefer=("keywords", "article_type"))
-        data = result.data
-        if isinstance(data, dict):
-            raw_keywords = data.get("keywords")
-            keywords = [
-                str(k) for k in raw_keywords
-            ] if isinstance(raw_keywords, list) else []
-            article_type = str(data.get("article_type") or "explainer").strip().lower()
-            from app.autoblog.planner import ARTICLE_TYPES, upgrade_article_type
-            if article_type not in ARTICLE_TYPES:
-                article_type = "explainer"
-            article_type = upgrade_article_type(topic, article_type)
-            return keywords, article_type
-    except Exception as exc:
-        print(f"[AutoBlog] keyword extraction failed (Nemotron): {type(exc).__name__}: {exc}")
-
-    # Heuristic fallback
-    from app.autoblog.sources import _pad_keywords
-    return _pad_keywords([], topic), "explainer"
+__all__ = [
+    "write_article",
+    "ArticleDraft",
+    "WrittenSection",
+]

@@ -1,4 +1,4 @@
-"""Render structured visuals (tables, charts) for AutoBlog v2 articles."""
+"""Render structured visuals (tables, charts) for AutoBlog v2 - fact-sheet grounded."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import html
 import re
 from typing import Any
 
+# ─── Theme ────────────────────────────────────────────────────────────────────
 
-# Dark theme colors
 AXIS_COLOR = "#94a3b8"
 SERIES_COLOR = "#38bdf8"
 GRID_COLOR = "#1e293b"
@@ -18,19 +18,6 @@ HIGHLIGHT_COLOR = "#fbbf24"
 
 def _escape(text: str) -> str:
     return html.escape(str(text), quote=True)
-
-
-def _is_number(val: Any) -> bool:
-    if isinstance(val, (int, float)):
-        return True
-    if isinstance(val, str):
-        s = val.strip().replace(",", "").replace("%", "")
-        try:
-            float(s)
-            return True
-        except ValueError:
-            return False
-    return False
 
 
 def _to_number(val: Any) -> float | None:
@@ -45,20 +32,22 @@ def _to_number(val: Any) -> float | None:
     return None
 
 
-def _canonical_number(val: Any) -> float | None:
-    return _to_number(val)
+# ─── Table ────────────────────────────────────────────────────────────────────
 
-
-def render_table(v: dict[str, Any], highlight_best: bool = False) -> str:
-    """Render a table visual as HTML figure with table."""
-    title = _escape(v.get("title", "Table"))
-    caption = _escape(v.get("caption", ""))
-    columns = [str(c) for c in v.get("columns", [])]
-    rows = v.get("rows", [])
+def render_table(vis: dict[str, Any]) -> str:
+    """Render a table visual as HTML figure. All data must come from fact sheet."""
+    title = _escape(vis.get("title", "Table"))
+    caption = _escape(vis.get("caption", ""))
+    columns = [str(c) for c in vis.get("columns", [])]
+    rows = vis.get("rows", [])
+    source_url = _escape(vis.get("source_url", ""))
+    intro = _escape(vis.get("intro_sentence", ""))
+    takeaway = _escape(vis.get("takeaway", ""))
 
     if not columns or not rows:
         return ""
 
+    # Detect numeric columns for highlighting
     numeric_cols: list[bool] = []
     col_values: list[list[float]] = [[] for _ in columns]
 
@@ -73,10 +62,9 @@ def render_table(v: dict[str, Any], highlight_best: bool = False) -> str:
         numeric_cols.append(len(col_values[i]) >= 2 and len(set(col_values[i])) > 1)
 
     best_per_col: dict[int, float] = {}
-    if highlight_best:
-        for i, is_num in enumerate(numeric_cols):
-            if is_num and col_values[i]:
-                best_per_col[i] = max(col_values[i])
+    for i, is_num in enumerate(numeric_cols):
+        if is_num and col_values[i]:
+            best_per_col[i] = max(col_values[i])
 
     parts = [
         '<figure class="blog-visual">',
@@ -99,21 +87,22 @@ def render_table(v: dict[str, Any], highlight_best: bool = False) -> str:
             parts.append(f"<td{td_class}>{cell_escaped}</td>")
         parts.append("</tr>")
 
-    parts.extend(
-        [
-            "</tbody></table>",
-            f'<figcaption>{caption}</figcaption>',
-            f'<div class="blog-visual-source">Source: {_escape(v.get("source_url", ""))}</div>',
-        ]
-    )
+    parts.extend([
+        "</tbody></table>",
+        f'<figcaption>{caption}</figcaption>',
+        f'<div class="blog-visual-source">Source: <a href="{source_url}" rel="noopener" target="_blank">{source_url}</a></div>',
+    ])
 
-    takeaway = v.get("takeaway", "").strip()
+    if intro:
+        parts.append(f'<p class="blog-visual-intro">{intro}</p>')
     if takeaway:
-        parts.append(f'<p class="blog-takeaway">{_escape(takeaway)}</p>')
+        parts.append(f'<p class="blog-takeaway">{takeaway}</p>')
 
     parts.append("</figure>")
     return "".join(parts)
 
+
+# ─── Bar Chart ────────────────────────────────────────────────────────────────
 
 def _render_svg_bar_chart(
     labels: list[str],
@@ -123,7 +112,6 @@ def _render_svg_bar_chart(
     width: int = 640,
     height: int = 320,
 ) -> str:
-    """Generate inline SVG for a horizontal bar chart."""
     if not labels or not values or len(labels) != len(values):
         return ""
 
@@ -211,6 +199,8 @@ def _render_svg_bar_chart(
 </svg>'''
 
 
+# ─── Line Chart ───────────────────────────────────────────────────────────────
+
 def _render_svg_line_chart(
     labels: list[str],
     values: list[float],
@@ -219,7 +209,6 @@ def _render_svg_line_chart(
     width: int = 640,
     height: int = 320,
 ) -> str:
-    """Generate inline SVG for a line chart."""
     if not labels or not values or len(labels) != len(values):
         return ""
 
@@ -310,25 +299,27 @@ def _render_svg_line_chart(
 </svg>'''
 
 
-def render_visual(visual: dict[str, Any]) -> str:
-    """Dispatch to the right renderer based on visual kind."""
-    kind = visual.get("kind")
+# ─── Dispatch ─────────────────────────────────────────────────────────────────
+
+def render_visual(vis: dict[str, Any]) -> str:
+    """Dispatch to renderer. Returns empty string if data invalid."""
+    kind = vis.get("kind")
     if kind == "table":
-        return render_table(visual)
+        return render_table(vis)
     elif kind == "bar":
-        labels = visual.get("labels", [])
-        values = [_canonical_number(v) for v in visual.get("values", [])]
+        labels = vis.get("labels", [])
+        values = [_to_number(v) for v in vis.get("values", [])]
         values = [v for v in values if v is not None]
         if len(labels) != len(values):
             return ""
-        return _render_svg_bar_chart(labels, values, visual.get("unit", ""), visual.get("title", ""))
+        return _render_svg_bar_chart(labels, values, vis.get("unit", ""), vis.get("title", ""))
     elif kind == "line":
-        labels = visual.get("labels", [])
-        values = [_canonical_number(v) for v in visual.get("values", [])]
+        labels = vis.get("labels", [])
+        values = [_to_number(v) for v in vis.get("values", [])]
         values = [v for v in values if v is not None]
         if len(labels) != len(values):
             return ""
-        return _render_svg_line_chart(labels, values, visual.get("unit", ""), visual.get("title", ""))
+        return _render_svg_line_chart(labels, values, vis.get("unit", ""), vis.get("title", ""))
     return ""
 
 
@@ -342,30 +333,10 @@ def replace_visual_markers(html_text: str, visuals: list[dict[str, Any]]) -> str
     return html_text
 
 
-def render_visual_html_fallback(visual: dict[str, Any]) -> str:
-    """Fallback: render visual as simple HTML table/list when SVG fails."""
-    kind = visual.get("kind")
-    if kind == "table":
-        return render_table(visual)
-    elif kind in ("bar", "line"):
-        labels = visual.get("labels", [])
-        values = visual.get("values", [])
-        unit = visual.get("unit", "")
-        title = visual.get("title", "")
-        caption = visual.get("caption", "")
-        takeaway = visual.get("takeaway", "")
-        source = visual.get("source_url", "")
+# ─── Exports ──────────────────────────────────────────────────────────────────
 
-        parts = [f'<h3>{_escape(title)}</h3>']
-        if caption:
-            parts.append(f'<p><em>{_escape(caption)}</em></p>')
-        parts.append('<ul>')
-        for l, v in zip(labels, values):
-            parts.append(f'<li>{_escape(l)}: {_escape(v)} {_escape(unit)}</li>')
-        parts.append('</ul>')
-        if source:
-            parts.append(f'<p class="blog-visual-source">Source: {_escape(source)}</p>')
-        if takeaway:
-            parts.append(f'<p class="blog-takeaway">{_escape(takeaway)}</p>')
-        return "\n".join(parts)
-    return ""
+__all__ = [
+    "render_visual",
+    "replace_visual_markers",
+    "render_table",
+]

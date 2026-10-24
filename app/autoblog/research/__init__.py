@@ -1,35 +1,23 @@
-"""Research modules for AutoBlog v2 - Topic selection, Keyword extraction, Data analysis."""
+"""Research for AutoBlog v2 - Planner-driven queries and fact sheet building."""
 
 from __future__ import annotations
 
 import asyncio
-import difflib
 import re
-from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.autoblog.config.settings import get_autoblog_settings
-from app.autoblog.llm.clients import nim_chat, extract_json, BlogPipelineError
+from app.autoblog.llm.clients import (
+    groq_research_with_nemotron_fallback,
+    extract_json,
+    BlogPipelineError,
+)
 from app.autoblog.sources import (
     ordered_research_queries,
     research_chunk,
-    fetch_recent_posts,
     research_snippets,
-    BLOCKED_TOPIC_JUNK,
-    FALLBACK_TOPICS,
-    STOPWORDS,
-    _result_line,
-    _dedupe_results,
-)
-from app.autoblog.planner import (
-    ARTICLE_PROFILES,
-    ARTICLE_TYPES,
-    upgrade_article_type,
-    build_profile,
-    MIN_CHART_NUMBERS,
-    MIN_TABLE_ENTITIES,
-    MIN_TABLE_ATTRIBUTES,
+    fetch_recent_posts,
 )
 
 
@@ -37,426 +25,258 @@ from app.autoblog.planner import (
 
 
 @dataclass(slots=True)
-class Research:
-    topic: str
-    keywords: list[str]
-    snippets: list[str]
-    source_urls: list[str] | None = None
-    article_type: str = "explainer"
-    profile: Any = None
-    data_availability: Any = None
+class FactSheet:
+    """Structured facts extracted from sources for the writer."""
+    claims: list[str] = field(default_factory=list)           # Key claims/statements
+    numbers: list[dict[str, Any]] = field(default_factory=list)  # {value, unit, context, source_url}
+    entities: list[dict[str, Any]] = field(default_factory=list)  # {name, type, context, source_url}
+    source_urls: list[str] = field(default_factory=list)
+    raw_snippets: list[str] = field(default_factory=list)
 
 
-@dataclass(slots=True)
-class KeywordPlan:
-    keywords: list[str]
-    article_type: str
+# ─── Query Planning (Groq) ────────────────────────────────────────────────────
 
 
-@dataclass(slots=True)
-class DataAvailability:
-    numbers: list[str]
-    examples: list[str]
-    named_items: list[str]
-    attributes: list[str]
-    has_chart_data: bool
-    has_table_data: bool
-    summary: str
+_QUERY_PLANNER_SYSTEM = """You are a research strategist. Given a topic angle and recent posts, write the exact search queries to fetch fresh, authoritative sources.
+
+Return ONLY strict JSON (no fences, no commentary):
+{
+  "news_query": "...",           // general news search for the topic
+  "official_query": "...",       // official sources (company blogs, arxiv, docs)
+  "benchmarks_query": "...",     // ONLY if comparison/benchmark/financial/growth/research type: numbers, benchmarks, specs, pricing
+  "reasoning": "..."             // brief: why these queries
+}
+
+RULES:
+- Queries must be specific (model names, companies, paper titles, measurable events)
+- Use current month/year context
+- Official query should target known authoritative domains
+- Benchmarks query ONLY for data-heavy article types
+- Keep queries under 100 chars for Tavily"""
 
 
-# ─── Constants ────────────────────────────────────────────────────────────────
+async def plan_research_queries(
+    topic: str,
+    angle: str,
+    article_type: str,
+    recent_posts: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Groq plans the exact search queries."""
+    recent_titles = [p.get("title", "") for p in recent_posts[:10] if p.get("title")]
+    recent_text = "\n".join(f"- {t}" for t in recent_titles) or "(none)"
 
+    prompt = f"""Topic: {topic}
+Angle: {angle}
+Article Type: {article_type}
 
-TOPIC_RETRY_LIMIT = 2
-SIMILARITY_THRESHOLD = 0.70
+Recent Post Titles (avoid duplication):
+{recent_text}
 
+Write the search queries now."""
 
-# ─── Helper Functions ─────────────────────────────────────────────────────────
+    result = await groq_research_with_nemotron_fallback(
+        _QUERY_PLANNER_SYSTEM,
+        prompt,
+        temperature=0.2,
+        max_tokens=1024,
+    )
 
+    parsed = extract_json(result.text)
+    data = parsed.data
+    if not isinstance(data, dict):
+        raise BlogPipelineError("Query planner returned invalid JSON.")
 
-def _topic_text(value: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
-
-
-def _topic_tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in _topic_text(value).split()
-        if token not in STOPWORDS and len(token) > 1
+    queries = {
+        "news_query": str(data.get("news_query", "")).strip(),
+        "official_query": str(data.get("official_query", "")).strip(),
+        "benchmarks_query": str(data.get("benchmarks_query", "")).strip() if article_type in ("comparison", "benchmark", "financial", "growth", "research") else "",
     }
 
+    # Fallback to rotating queries if planner fails
+    if not queries["news_query"] or not queries["official_query"]:
+        from app.autoblog.sources import _ordered_research_queries, _month_year
+        month_year = _month_year()
+        fallback = ordered_research_queries()
+        cat, q = fallback[0]
+        queries["news_query"] = queries["news_query"] or q.format(month_year=month_year)
+        queries["official_query"] = queries["official_query"] or q.format(month_year=month_year)
 
-def _topic_sequence_similarity(first: str, second: str) -> float:
-    first_text, second_text = _topic_text(first), _topic_text(second)
-    if not first_text or not second_text:
-        return 0.0
-    return difflib.SequenceMatcher(None, first_text, second_text).ratio()
-
-
-def _topic_similarity(first: str, second: str) -> float:
-    sequence = _topic_sequence_similarity(first, second)
-    first_tokens, second_tokens = _topic_tokens(first), _topic_tokens(second)
-    if not first_tokens or not second_tokens:
-        return sequence
-    overlap = len(first_tokens & second_tokens)
-    jaccard = overlap / len(first_tokens | second_tokens)
-    containment = overlap / min(len(first_tokens), len(second_tokens))
-    return max(sequence, jaccard, containment)
+    return queries
 
 
-def _find_duplicate(
-    topic: str, recent_posts: list[dict[str, Any]]
-) -> tuple[float, str]:
-    best_score = 0.0
-    best_title = ""
-    for post in recent_posts:
-        title = str(post.get("title") or "").strip()
-        if title:
-            score = _topic_similarity(topic, title)
-            if score > best_score:
-                best_score, best_title = score, title
-        keywords = post.get("keywords")
-        if not isinstance(keywords, list):
-            continue
-        for keyword in keywords:
-            text = str(keyword or "").strip()
-            if not text or text.lower() in BLOCKED_TOPIC_JUNK:
-                continue
-            score = _topic_sequence_similarity(topic, text)
-            if score > best_score:
-                best_score, best_title = score, text
-    return best_score, best_title
+# ─── Fact Extraction (Groq) ───────────────────────────────────────────────────
 
 
-def _blocked_topics(recent_posts: list[dict[str, Any]]) -> list[str]:
-    blocked: list[str] = []
-    seen: set[str] = set()
-    for post in recent_posts:
-        values: list[Any] = [post.get("title")]
-        keywords = post.get("keywords")
-        if isinstance(keywords, list):
-            values.extend(keywords)
-        for value in values:
-            text = str(value or "").strip()
-            key = text.lower()
-            if text and key not in seen and key not in BLOCKED_TOPIC_JUNK:
-                seen.add(key)
-                blocked.append(text[:160])
-    return blocked[:30]
-
-
-def _heuristic_keywords(text: str, limit: int = 5) -> list[str]:
-    words = re.findall(r"[a-z][a-z'-]{2,}", text.lower())
-    counts = Counter(w for w in words if w not in STOPWORDS)
-    out: list[str] = []
-    for word, _ in counts.most_common():
-        if word not in out:
-            out.append(word)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _pad_keywords(keywords: list[str], topic: str) -> list[str]:
-    settings = get_autoblog_settings()
-    tokens = [t for t in re.findall(r"[a-z0-9]{2,}", topic.lower()) if t not in STOPWORDS]
-    bigrams = [f"{a} {b}" for a, b in zip(tokens, tokens[1:])]
-    out: list[str] = []
-    for value in [*keywords, *bigrams, *tokens, *_heuristic_keywords(topic)]:
-        clean = value.strip().lower()
-        if clean and clean not in out:
-            out.append(clean)
-        if len(out) >= settings.max_results:
-            break
-    return out or [topic.lower()]
-
-
-# ─── Topic Selection (Nemotron Ultra) ─────────────────────────────────────────
-
-
-async def topic_chunk(
-    results: list[dict[str, str]],
-    blocked_topics: list[str] | None = None,
-    category: str | None = None,
-) -> str:
-    """Nemotron Ultra picks the day's trending topic."""
-    if not results:
-        from app.autoblog.sources import _day_index
-        topic = FALLBACK_TOPICS[_day_index() % len(FALLBACK_TOPICS)]
-        print(f"[AutoBlog] research fallback -> topic={topic!r}")
-        return topic
-
-    blob = "\n".join(_result_line(result) for result in results)
-    system = """You are an SEO trend analyst for ATLAS, a learning OS for students.
-From the research snippets, pick ONE specific, currently trending, searchable blog topic (not a generic pillar term).
+_FACT_EXTRACTOR_SYSTEM = """You are a fact extractor. From the research snippets, extract a structured fact sheet.
 
 Return ONLY strict JSON (no fences, no commentary):
-{"topic": "..."}
+{
+  "claims": ["...", "..."],                    // 5-15 key claims/statements, each one sentence
+  "numbers": [                                 // numbers WITH units and context
+    {"value": "...", "unit": "...", "context": "...", "source_url": "..."}
+  ],
+  "entities": [                                // named entities: models, companies, products, papers
+    {"name": "...", "type": "model|company|product|paper|person", "context": "...", "source_url": "..."}
+  ],
+  "source_urls": ["...", "..."]
+}
 
-- topic: a concrete angle a reader would click, max 120 chars.
-- Prefer a specific model, company, research paper, or measurable news event over generic advice.
-- Never repeat an angle from the recently published posts supplied in the prompt."""
-    if blocked_topics:
-        avoid = "\n".join(f"- {topic[:160]}" for topic in blocked_topics[:20])
-        system += (
-            "\n\nRECENTLY PUBLISHED (strictly avoid these angles):\n"
-            f"{avoid}\n"
-            "Choose a clearly different story, model, company, or event."
-        )
-    category_line = f"Preferred category: {category}\n" if category else ""
-    try:
-        text = await nim_chat(
-            system,
-            f"{category_line}Today's research:\n{blob}",
-            temperature=0.3,
-            max_tokens=2048,
-        )
-        result = extract_json(text, prefer="topic")
-        data = result.data
-        topic = str(data.get("topic") or "").strip() if isinstance(data, dict) else ""
-        if topic:
-            return topic[:120]
-        print("[AutoBlog] topic chunk returned no topic - using headline fallback.")
-    except Exception as exc:
-        print(f"[AutoBlog] topic extraction failed (Nemotron): {type(exc).__name__}: {exc}")
-    headline = results[0]["title"].split("|")[0].split(" - ")[0].strip()[:120]
-    return headline or FALLBACK_TOPICS[0]
+RULES:
+- Every claim must be traceable to a source_url in the snippets
+- Numbers MUST include unit (%, $, tokens, ms, GB, etc.) and context (what it measures)
+- Entities: classify type, include context
+- Source URLs must come from the provided snippets
+- Deduplicate: same claim/number/entity from multiple sources -> one entry with first source
+- Max 15 claims, 30 numbers, 20 entities"""
 
 
-# ─── Keyword Extraction (Nemotron Ultra) ──────────────────────────────────────
+async def extract_fact_sheet(
+    snippets: list[str],
+    source_urls: list[str],
+) -> FactSheet:
+    """Groq extracts structured facts from raw snippets."""
+    snippets_text = "\n\n".join(snippets[:30]) or "(none)"
+    urls_text = "\n".join(f"- {u}" for u in source_urls[:20]) or "(none)"
 
+    prompt = f"""Research Snippets:
+{snippets_text}
 
-async def keyword_chunk(topic: str, results: list[dict[str, str]]) -> KeywordPlan:
-    """Nemotron Ultra extracts the top 3-5 SEO keywords + article type."""
-    blob = "\n".join(_result_line(result) for result in results) or "(no research snippets)"
-    system = """You are an SEO content strategist for ATLAS, a learning OS for students.
-Extract the top 3 to 5 SEO keywords for the given blog topic.
+Source URLs:
+{urls_text}
 
-Return ONLY strict JSON (no fences, no commentary):
-{"keywords": ["...", "...", "..."], "article_type": "..."}
+Extract the fact sheet now."""
 
-- keywords: 3 to 5, each 1-3 words, lowercase, no dupes, primary keyword first.
-- article_type: one of: news, explainer, how_to, opinion, comparison, benchmark, financial, growth, research.
-  Choose the type that best fits the topic. Prefer specific types (comparison, benchmark, financial, growth, research) when the topic clearly fits.
-  If unsure, use "explainer"."""
-    try:
-        text = await nim_chat(
-            system,
-            f"Topic: {topic}\nResearch snippets:\n{blob}",
-            temperature=0.3,
-            max_tokens=2048,
-        )
-        result = extract_json(text, prefer=("keywords", "article_type"))
-        data = result.data
-        if isinstance(data, dict):
-            raw_keywords = data.get("keywords")
-            keywords = _pad_keywords(
-                [str(k) for k in raw_keywords] if isinstance(raw_keywords, list) else [], topic
-            )
-            article_type = str(data.get("article_type") or "explainer").strip().lower()
-            if article_type not in ARTICLE_TYPES:
-                article_type = "explainer"
-            article_type = upgrade_article_type(topic, article_type)
-            print(f"[AutoBlog] keyword extraction OK -> {', '.join(keywords)} (type: {article_type})")
-            return KeywordPlan(keywords=keywords, article_type=article_type)
-    except Exception as exc:
-        print(f"[AutoBlog] keyword extraction failed (Nemotron): {type(exc).__name__}: {exc}")
-    return KeywordPlan(keywords=_pad_keywords([], topic), article_type="explainer")
+    result = await groq_research_with_nemotron_fallback(
+        _FACT_EXTRACTOR_SYSTEM,
+        prompt,
+        temperature=0.1,
+        max_tokens=4096,
+    )
 
+    parsed = extract_json(result.text)
+    data = parsed.data
+    if not isinstance(data, dict):
+        raise BlogPipelineError("Fact extractor returned invalid JSON.")
 
-# ─── Data Availability Analysis ───────────────────────────────────────────────
+    claims = [str(c).strip() for c in data.get("claims", []) if str(c).strip()][:15]
+    numbers = []
+    for n in data.get("numbers", []):
+        if isinstance(n, dict) and n.get("value") and n.get("unit"):
+            numbers.append({
+                "value": str(n.get("value", "")).strip(),
+                "unit": str(n.get("unit", "")).strip(),
+                "context": str(n.get("context", "")).strip(),
+                "source_url": str(n.get("source_url", "")).strip(),
+            })
+    entities = []
+    for e in data.get("entities", []):
+        if isinstance(e, dict) and e.get("name"):
+            entities.append({
+                "name": str(e.get("name", "")).strip(),
+                "type": str(e.get("type", "")).strip(),
+                "context": str(e.get("context", "")).strip(),
+                "source_url": str(e.get("source_url", "")).strip(),
+            })
+    source_urls = [str(u).strip() for u in data.get("source_urls", []) if str(u).strip()]
 
+    # Deduplicate numbers by (value, unit, context)
+    seen_nums = set()
+    unique_numbers = []
+    for n in numbers:
+        key = (n["value"], n["unit"], n["context"])
+        if key not in seen_nums:
+            seen_nums.add(key)
+            unique_numbers.append(n)
 
-def _extract_numbers(text: str) -> list[str]:
-    patterns = [
-        r"\$[\d,]+\.?\d*\s*(?:billion|million|bn|m|k)?",
-        r"[\d,]+\.?\d*\s*(?:billion|million|bn|m|k)\s*(?:dollars?|usd|eur|users?|downloads?)",
-        r"\d+(?:\.\d+)?\s*%",
-        r"\d+(?:\.\d+)?\s*(?:out of|/)\s*\d+(?:\.\d+)?",
-        r"\b\d+(?:\.\d+)?\s*(?:points?|score|rating)\b",
-        r"\b(?:19|20)\d{2}\b",
-        r"\b\d+(?:\.\d+)?\s*(?:x|times|fold)\b",
-        r"\bv?\d+(?:\.\d+)+(?:\s*\+\s*\d+(?:\.\d+)?)*\b",
-        r"\b\d+(?:,\d{3})+(?:\.\d+)?\b",
-    ]
-    combined = "|".join(patterns)
-    matches = re.findall(combined, text, re.IGNORECASE)
-    normalized = []
-    for m in matches:
-        clean = m.strip().replace(",", "").replace("$", "")
-        normalized.append(clean)
-    return normalized
+    # Deduplicate entities by name
+    seen_ent = set()
+    unique_entities = []
+    for e in entities:
+        key = e["name"].lower()
+        if key not in seen_ent:
+            seen_ent.add(key)
+            unique_entities.append(e)
 
-
-def _extract_named_items(text: str) -> list[str]:
-    pattern = r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:\s+(?:v?\d+(?:\.\d+)*))?\b"
-    matches = re.findall(pattern, text)
-    common = {"The", "This", "That", "These", "Those", "Then", "There", "Their", "We", "You", "It", "AI", "API", "URL", "HTTP", "CEO", "CTO"}
-    items = []
-    for m in matches:
-        if m not in common and len(m) > 2:
-            items.append(m)
-    from app.autoblog.sources import AI_MODEL_RE
-    model_matches = AI_MODEL_RE.findall(text)
-    for m in model_matches:
-        m_clean = " ".join(m.split())
-        if m_clean not in items:
-            items.append(m_clean)
-    seen = set()
-    unique = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            unique.append(item)
-    return unique[:10]
-
-
-def _extract_attributes(text: str) -> list[str]:
-    attr_keywords = [
-        "price", "cost", "speed", "latency", "accuracy", "performance",
-        "context", "tokens", "parameters", "benchmark", "throughput",
-        "memory", "storage", "bandwidth", "resolution", "fps", "tps",
-        "revenue", "growth", "market share", "users", "customers",
-        "valuation", "funding", "investment", "profit", "margin",
-        "release date", "launch", "availability", "pricing",
-        "features", "specs", "specifications", "capabilities",
-    ]
-    text_lower = text.lower()
-    found = [attr for attr in attr_keywords if attr in text_lower]
-    return found
-
-
-def analyze_data_availability(research: Research) -> DataAvailability:
-    full_text = " ".join(research.snippets)
-    numbers = _extract_numbers(full_text)
-    named_items = _extract_named_items(full_text)
-    attributes = _extract_attributes(full_text)
-
-    unique_numbers = list(dict.fromkeys(numbers))
-    has_chart_data = len(unique_numbers) >= MIN_CHART_NUMBERS
-    has_table_data = len(named_items) >= MIN_TABLE_ENTITIES and len(attributes) >= MIN_TABLE_ATTRIBUTES
-
-    summary_parts = []
-    if unique_numbers:
-        summary_parts.append(f"{len(unique_numbers)} numeric facts")
-    if named_items:
-        summary_parts.append(f"{len(named_items)} named items ({', '.join(named_items[:3])})")
-    if attributes:
-        summary_parts.append(f"{len(attributes)} attributes ({', '.join(attributes[:3])})")
-
-    return DataAvailability(
-        numbers=unique_numbers,
-        examples=unique_numbers[:10],
-        named_items=named_items,
-        attributes=attributes,
-        has_chart_data=has_chart_data,
-        has_table_data=has_table_data,
-        summary="; ".join(summary_parts) if summary_parts else "No structured data found",
+    return FactSheet(
+        claims=claims,
+        numbers=unique_numbers[:30],
+        entities=unique_entities[:20],
+        source_urls=source_urls[:15],
+        raw_snippets=snippets,
     )
 
 
-# ─── High-level Research Functions ────────────────────────────────────────────
+# ─── High-level Research Flow ─────────────────────────────────────────────────
 
 
-async def research_and_select_topic() -> tuple[Research, list[dict[str, str]]]:
-    """Research, generate a topic, reject repeats, then force a new category."""
+async def run_research(
+    topic: str,
+    angle: str,
+    article_type: str,
+) -> tuple[FactSheet, list[dict[str, str]]]:
+    """
+    1. Fetch recent posts for dedupe context
+    2. Planner writes search queries
+    3. Execute queries via Tavily
+    4. Extract fact sheet from results
+    Returns (fact_sheet, raw_results_for_logging)
+    """
     settings = get_autoblog_settings()
-    queries = ordered_research_queries()
+
+    # Step 1: Recent posts for context
     recent_posts = await asyncio.to_thread(fetch_recent_posts, settings.recent_posts_limit)
-    blocked = _blocked_topics(recent_posts)
-    attempted: list[str] = []
-    results: list[dict[str, str]] = []
-    topic = ""
 
-    for attempt in range(TOPIC_RETRY_LIMIT + 1):
-        category, query = queries[attempt % len(queries)]
-        print(
-            f"[AutoBlog] research attempt {attempt + 1}/{TOPIC_RETRY_LIMIT + 1}: "
-            f"{category} -> {query!r}",
-            flush=True,
-        )
-        results = await research_chunk(query)
-        topic = await topic_chunk(results, [*blocked, *attempted], category=category)
-        score, match = _find_duplicate(topic, recent_posts)
-        print(
-            f"[AutoBlog] candidate topic={topic!r} similarity={score:.2f}"
-            + (f" match={match!r}" if match else ""),
-            flush=True,
-        )
-        if score <= SIMILARITY_THRESHOLD:
-            return (
-                Research(
-                    topic=topic,
-                    keywords=[],
-                    snippets=research_snippets(results),
-                ),
-                results,
-            )
-        attempted.append(topic)
-        print(
-            f"[AutoBlog] duplicate topic rejected ({score:.0%} similar) - retrying.",
-            flush=True,
-        )
+    # Step 2: Plan queries
+    queries = await plan_research_queries(topic, angle, article_type, recent_posts)
+    print(f"[AutoBlog] Research queries: news={queries['news_query']!r} official={queries['official_query']!r} benchmarks={queries['benchmarks_query']!r}", flush=True)
 
-    used_categories = {category for category, _ in queries[: TOPIC_RETRY_LIMIT + 1]}
-    forced_category, forced_query = next(
-        (
-            (category, query)
-            for category, query in queries
-            if category not in used_categories
-        ),
-        queries[-1],
-    )
+    # Step 3: Execute searches
+    all_results: list[dict[str, str]] = []
+
+    # News query
+    news_results = await research_chunk(queries["news_query"])
+    all_results.extend(news_results)
+
+    # Official sources query
+    official_results = await research_chunk(queries["official_query"])
+    all_results.extend(official_results)
+
+    # Benchmarks query (if applicable)
+    if queries["benchmarks_query"]:
+        bench_results = await research_chunk(queries["benchmarks_query"])
+        all_results.extend(bench_results)
+
+    # Dedupe by URL
+    seen_urls = set()
+    unique_results = []
+    for r in all_results:
+        url = r.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_results.append(r)
+
+    print(f"[AutoBlog] Research complete: {len(unique_results)} unique sources", flush=True)
+
+    # Step 4: Extract fact sheet
+    snippets = research_snippets(unique_results)
+    source_urls = [r.get("url", "") for r in unique_results if r.get("url")]
+    fact_sheet = await extract_fact_sheet(snippets, source_urls)
+
     print(
-        f"[AutoBlog] forcing a different category: {forced_category} -> "
-        f"{forced_query!r}",
+        f"[AutoBlog] Fact sheet: {len(fact_sheet.claims)} claims, "
+        f"{len(fact_sheet.numbers)} numbers, {len(fact_sheet.entities)} entities, "
+        f"{len(fact_sheet.source_urls)} source URLs",
         flush=True,
     )
-    results = await research_chunk(forced_query)
-    topic = await topic_chunk(results, [*blocked, *attempted], category=forced_category)
-    score, match = _find_duplicate(topic, recent_posts)
-    if score > SIMILARITY_THRESHOLD:
-        print(
-            f"[AutoBlog] forced topic still {score:.0%} similar to {match!r}; "
-            "accepting it to avoid an empty run.",
-            flush=True,
-        )
-    return (
-        Research(
-            topic=topic,
-            keywords=[],
-            snippets=research_snippets(results),
-        ),
-        results,
-    )
 
-
-async def extract_keywords(topic: str, results: list[dict[str, str]]) -> KeywordPlan:
-    return await keyword_chunk(topic, results)
-
-
-async def analyze_data_and_profile(
-    topic: str, article_type: str, snippets: list[str]
-) -> tuple[DataAvailability, dict[str, Any]]:
-    research = Research(topic=topic, keywords=[], snippets=snippets, article_type=article_type)
-    data = analyze_data_availability(research)
-    profile = build_profile(article_type, topic, data)
-    return data, profile
+    return fact_sheet, unique_results
 
 
 # ─── Exports ──────────────────────────────────────────────────────────────────
 
 __all__ = [
-    "research_and_select_topic",
-    "extract_keywords",
-    "analyze_data_and_profile",
-    "topic_chunk",
-    "keyword_chunk",
-    "analyze_data_availability",
-    "Research",
-    "KeywordPlan",
-    "DataAvailability",
-    "TOPIC_RETRY_LIMIT",
-    "SIMILARITY_THRESHOLD",
-    "FALLBACK_TOPICS",
+    "run_research",
+    "plan_research_queries",
+    "extract_fact_sheet",
+    "FactSheet",
 ]
