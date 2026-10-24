@@ -45,36 +45,9 @@ async def run_pipeline() -> dict[str, Any] | None:
             # ─── Step 1: Research (topic discovery + fact sheet) ───
             print("[AutoBlog] Step 1: Research (queries + fact extraction)...", flush=True)
             try:
-                # First, discover a topic using the old rotating approach
-                from app.autoblog.sources import _fetch_recent_posts, _blocked_topics, _topic_chunk, _find_duplicate, _ordered_research_queries
-                from app.autoblog.config.settings import TOPIC_RETRY_LIMIT, SIMILARITY_THRESHOLD, FALLBACK_TOPICS
-
                 settings = get_autoblog_settings()
-                recent_posts = await asyncio.to_thread(_fetch_recent_posts, settings.recent_posts_limit)
-                blocked = _blocked_topics(recent_posts)
-                attempted: list[str] = []
-                results: list[dict[str, str]] = []
-                topic = ""
-                angle = ""
-
-                queries = _ordered_research_queries()
-                for attempt in range(TOPIC_RETRY_LIMIT + 1):
-                    category, query = queries[attempt % len(queries)]
-                    print(f"[AutoBlog] Topic discovery attempt {attempt + 1}: {category}", flush=True)
-                    results = await asyncio.to_thread(
-                        __import__("app.autoblog.sources", fromlist=["research_chunk"]).research_chunk, query
-                    )
-                    topic = await _topic_chunk(results, [*blocked, *attempted], category=category)
-                    score, match = _find_duplicate(topic, recent_posts)
-                    if score <= SIMILARITY_THRESHOLD:
-                        break
-                    attempted.append(topic)
-
-                if score > SIMILARITY_THRESHOLD:
-                    topic = FALLBACK_TOPICS[0]
-
-                # Now run full research with fact extraction
-                fact_sheet, raw_results = await run_research(topic, "exploring the topic", "explainer")
+                # run_research handles topic discovery internally using rotating queries
+                fact_sheet, raw_results = await run_research("trending AI topic", "exploring the topic", "explainer")
                 print(f"[AutoBlog] Step 1 complete: {len(fact_sheet.claims)} claims, {len(fact_sheet.numbers)} numbers", flush=True)
             except Exception as exc:
                 tb = traceback.format_exc()
@@ -113,20 +86,12 @@ async def run_pipeline() -> dict[str, Any] | None:
                 "title": draft.title,
                 "excerpt": draft.excerpt,
                 "content_html": replace_visual_markers(
-                    draft.sections[0].html if draft.sections else ""  # will be rebuilt
-                    + "\n".join(s.html for s in draft.sections)
-                    + "\n" + draft.faq_html,
+                    "\n".join(s.html for s in draft.sections) + "\n" + draft.faq_html,
                     draft.visuals
                 ),
                 "visuals": draft.visuals,
                 "tags": draft.tags,
             }
-            # Rebuild full content_html properly
-            all_sections = "\n".join(s.html for s in draft.sections)
-            article_data["content_html"] = replace_visual_markers(
-                all_sections + "\n" + draft.faq_html,
-                draft.visuals
-            )
 
             fix_attempt = 0
             max_fixes = 2

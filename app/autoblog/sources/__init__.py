@@ -522,6 +522,7 @@ __all__ = [
     "research_chunk",
     "fetch_recent_posts",
     "research_snippets",
+    "_month_year",
     # Pixabay images
     "fetch_relevant_image",
     "persist_cover_image",

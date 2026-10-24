@@ -94,7 +94,7 @@ Write the search queries now."""
 
     # Fallback to rotating queries if planner fails
     if not queries["news_query"] or not queries["official_query"]:
-        from app.autoblog.sources import _ordered_research_queries, _month_year
+        from app.autoblog.sources import ordered_research_queries, _month_year
         month_year = _month_year()
         fallback = ordered_research_queries()
         cat, q = fallback[0]
