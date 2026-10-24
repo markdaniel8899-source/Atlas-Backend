@@ -85,7 +85,7 @@ from tavily import TavilyClient
 from app import ai_service
 from app.cache import clear_all as clear_read_caches
 from app.config import get_settings
-from app.plugins.seo_checker import evaluate_seo_lightweight
+from app.plugins.seo_checker import evaluate_article, GateResult
 # from app.services.blog_content_gate import evaluate_article, GateResult
 from app.services.blog_visuals import (
     render_visual,
@@ -2013,52 +2013,41 @@ async def run_staggered_blog_pipeline() -> dict[str, Any] | None:
                 return None
             await asyncio.sleep(WRITE_PAUSE_SECONDS)
 
-            # SEO Gate — lightweight on-page rules (stdlib only, zero RAM).
-            # A failing draft gets ONE rewrite with the exact feedback; a
-            # second failure discards the run WITHOUT saving anything.
-            seo_keyword = research.keywords[0] if research.keywords else research.topic
-            seo_report = evaluate_seo_lightweight(
-                meta_title, article["content_html"], seo_keyword, meta_description
-            )
-            if not seo_report["passed"]:
-                print(
-                    f"[AutoBlog Background] SEO gate score "
-                    f"{seo_report['score']}/100 — {seo_report['feedback']} "
-                    "One rewrite attempt...",
-                    flush=True,
+            # Content Gate — hard checks, all must pass.
+            # One rewrite max; meta-only failure regenerates meta only.
+            rewrite_count = 0
+            max_rewrites = 1
+            json_repaired = article.get("_json_meta", {}).get("repaired", False)
+
+            while True:
+                gate = evaluate_article(
+                    {
+                        "title": article["title"],
+                        "excerpt": article["excerpt"],
+                        "content_html": article["content_html"],
+                        "visual": article.get("visual"),
+                        "tags": article["tags"],
+                    },
+                    meta_title, article["excerpt"], research, json_repaired
                 )
-                try:
-                    article = await _write_article(
-                        research, seo_feedback=seo_report["feedback"]
-                    )
-                except Exception as exc:  # noqa: BLE001 - discard, never crash
-                    import traceback
-                    import re
-                    tb = traceback.format_exc()
-                    tb = re.sub(r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+', r'\1=***', tb)
-                    print(
-                        "[AutoBlog Background] SEO gate rewrite failed "
-                        f"({type(exc).__name__}: {exc}). Traceback: {tb}. Draft discarded "
-                        "(nothing saved).",
-                        flush=True,
-                    )
+                if gate.passed:
+                    print(f"[AutoBlog Background] Content gate passed.", flush=True)
+                    break
+                if gate.meta_only and rewrite_count == 0:
+                    # Regenerate meta only
+                    print(f"[AutoBlog Background] Meta-only failure, regenerating meta...", flush=True)
+                    meta_title, meta_description = await _meta_chunk(research)
+                    continue
+                if rewrite_count >= 1:
+                    print(f"[AutoBlog Background] Content gate FAILED after rewrite: {gate.reasons}", flush=True)
                     return None
-                seo_report = evaluate_seo_lightweight(
-                    meta_title, article["content_html"], seo_keyword, meta_description
-                )
-            if not seo_report["passed"]:
-                print(
-                    f"[AutoBlog Background] SEO gate FAILED "
-                    f"({seo_report['score']}/100) — {seo_report['feedback']} "
-                    "Draft discarded (nothing saved).",
-                    flush=True,
-                )
-                return None
-            print(
-                f"[AutoBlog Background] SEO gate passed "
-                f"({seo_report['score']}/100).",
-                flush=True,
-            )
+                print(f"[AutoBlog Background] Content gate failed: {gate.reasons} — rewrite {rewrite_count+1}/1", flush=True)
+                rewrite_count += 1
+                try:
+                    article = await _write_article(research, feedback="; ".join(gate.reasons))
+                except Exception as exc:
+                    print(f"[AutoBlog Background] Rewrite failed: {type(exc).__name__}: {exc}", flush=True)
+                    return None
 
             # Step 5/6 — Images (cover first, then 1-3 unique in-article images).
             print(
