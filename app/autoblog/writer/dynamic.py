@@ -264,23 +264,18 @@ def _display_keyword(keyword: str) -> str:
 
 
 def _format_facts(fact_sheet: FactSheet) -> str:
-    claims = "\n".join(f"- {claim}" for claim in fact_sheet.claims[:15]) or "(none)"
+    key_points = "\n".join(f"- {p}" for p in fact_sheet.raw_snippets[:8]) or "(none)"
+    summary = " ".join(fact_sheet.claims[:4]) or "(no summary)"
     numbers = "\n".join(
-        f"- {item.get('value')} {item.get('unit')}: {item.get('context', '')[:180]} "
-        f"(source: {item.get('source_url', '')})"
-        for item in fact_sheet.numbers[:20]
+        f"- {item.get('value')} {item.get('unit')}: {item.get('context', '')[:120]}"
+        for item in fact_sheet.numbers[:6]
     ) or "(none)"
-    entities = "\n".join(
-        f"- {item.get('name')} ({item.get('type', 'entity')}): "
-        f"{item.get('context', '')[:140]} (source: {item.get('source_url', '')})"
-        for item in fact_sheet.entities[:15]
-    ) or "(none)"
-    sources = "\n".join(f"- {url}" for url in fact_sheet.source_urls[:12]) or "(none)"
+    sources = "\n".join(f"- {url}" for url in fact_sheet.source_urls[:6]) or "(none)"
     return (
-        f"Claims:\n{claims}\n\n"
-        f"Numbers (with units):\n{numbers}\n\n"
-        f"Entities:\n{entities}\n\n"
-        f"Source URLs:\n{sources}"
+        f"Key Data Points:\n{key_points}\n\n"
+        f"Summary:\n{summary}\n\n"
+        f"Key Numbers:\n{numbers}\n\n"
+        f"Sources:\n{sources}"
     )
 
 

@@ -210,7 +210,7 @@ def _nemotron_chat(
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
-            timeout=180,
+            timeout=300,
         )
         latency_ms = int((time.perf_counter() - start) * 1000)
 
