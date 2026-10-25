@@ -139,6 +139,7 @@ Required schema:
 }
 
 RULES:
+- STRICT LENGTH REQUIREMENT: The article MUST be at least 900 words long. Expand on examples, add detailed explanations, and ensure comprehensive coverage to meet this length. Do not write short, superficial content.
 - title: 45-65 characters, specific, no clickbait, no colon-stuffed keyword string
 - meta_title: 50-60 characters and starts with the primary keyword
 - meta_description: 150-160 characters, contains the primary keyword and one clear call to action

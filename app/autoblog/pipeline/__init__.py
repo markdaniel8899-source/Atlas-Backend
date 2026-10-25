@@ -99,7 +99,7 @@ async def run_pipeline() -> dict[str, Any] | None:
 
             # ─── Step 4b: Cover image fetch ───
             print("[AutoBlog] Step 4b/7: Fetching cover image...", flush=True)
-            cover_image_url = await fetch_cover_image(
+            _, cover_image_url = await fetch_cover_image(
                 draft.title,
                 [keywords.primary_keyword, *keywords.secondary_keywords[:3]],
             )
