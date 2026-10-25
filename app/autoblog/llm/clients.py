@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, Timeout
 import google.generativeai as genai
 
 from app.autoblog.config.settings import get_autoblog_settings
@@ -267,11 +267,14 @@ async def nemotron_chat(
             max_tokens=max_tokens,
         )
         # Check for too little text (heuristic: < 100 chars for writer calls)
-        if len(result.text) < 100 and max_tokens > 1000:
+        if len(result.text) < 100:
             raise BlogPipelineError("Nemotron returned too little text")
         return result
-    except BlogPipelineError as exc:
-        logger.warning(f"[AutoBlog] Nemotron failed, falling back to Gemini: {exc}")
+    except (BlogPipelineError, Timeout) as exc:
+        if isinstance(exc, Timeout):
+            logger.warning("Nemotron timed out, falling back to Gemini...")
+        else:
+            logger.warning(f"[AutoBlog] Nemotron failed, falling back to Gemini: {exc}")
         return await gemini_chat(system, prompt, temperature=temperature, max_tokens=max_tokens)
 
 
