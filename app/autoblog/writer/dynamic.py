@@ -169,6 +169,14 @@ Analyze the provided `key_data_points` and the text.
 3. IMAGES: For general news, inject up to 2 `<img>` tags after relevant H2 headings.
 4. STRICT NO-HALLUCINATION: NEVER invent data, models, or numbers. If the provided `key_data_points` do not contain clear, structured data, DO NOT generate a chart or table. Leave the text as is.
 
+FORMATTING RULES (MANDATORY):
+1. TABLES: You MUST wrap tabular data in proper HTML: <table><thead><tr><th>Col1</th>...</tr></thead><tbody><tr><td>Val1</td>...</tr></tbody></table>. Do not output plain text tables.
+2. MERMAID CHARTS: 
+   - The `title` MUST be under 10 words. NEVER copy long paper titles or abstracts.
+   - The `x-axis` labels MUST be under 15 characters each. Truncate long names (e.g., "Benchmark Size" instead of "total benchmark size used by M").
+   - The `y-axis` max value MUST be higher than the largest data point.
+   - Output ONLY valid ```mermaid ... ``` blocks.
+
 RULES:
 - MAX 3 visual elements TOTAL in final output.
 - DATA/COMPARISON TOPICS (has hard numbers): Inject exactly ONE clean HTML <table> and ONE ```mermaid xychart-beta``` chart block. Place them immediately after the most relevant H2 section. Use EXACT categories/values from the research data. Wrap Mermaid in ```mermaid ... ```.
@@ -194,6 +202,10 @@ _BANNED_FAQ_PHRASES: tuple[str, ...] = (
     "students should verify",
     "a useful check is",
     "the practical test is",
+    "a specific outcome you can measure",
+    "the fact sheet references",
+    "the benchmark gives you",
+    "a clear conclusion you can act on",
 )
 
 def _strip_banned_phrases(text: str) -> str:
@@ -1003,7 +1015,7 @@ async def inject_visuals_smartly(
 
     # Aggressive FAQ filler regex cleanup
     _AGGRESSIVE_FAQ_REGEX = re.compile(
-        r"(?i)(the data supports|a clear conclusion you can act on|the benchmark gives you|the result is a concrete takeaway|students should verify|the practical test is|a useful check is|the evidence points to)",
+        r"(?i)(the data supports|a clear conclusion you can act on|the benchmark gives you|the result is a concrete takeaway|students should verify|the practical test is|a useful check is|the evidence points to|a specific outcome you can measure|the fact sheet references|the benchmark gives you|a clear conclusion you can act on)",
         re.IGNORECASE,
     )
     content_html = _AGGRESSIVE_FAQ_REGEX.sub("", content_html)
