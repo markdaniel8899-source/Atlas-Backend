@@ -69,13 +69,15 @@ Required schema:
 VISUALS REQUIREMENT (MANDATORY FOR DATA/COMPARISON TOPICS):
 If the topic involves financial data, benchmarks, comparisons, or statistics, you MUST generate the visuals directly in the content:
 1. DATA TABLE: Create a clean, well-formatted HTML or Markdown table with realistic, researched metrics.
-2. MERMAID CHART: Immediately after the table, include a Mermaid.js code block. MANDATORY: Wrap it in ```mermaid and ``` code blocks. Example:
+2. MERMAID CHART: Immediately after the table, include a Mermaid.js code block wrapped in ```mermaid and ```.
+DYNAMIC RULE: Extract the EXACT categories and values from the HTML table you just generated. If your table has 2 items, the chart must have 2. If it has 5, the chart must have 5. Do not use fixed examples.
+Format:
 ```mermaid
 xychart-beta
-    title "Model Comparison"
-    x-axis [GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro]
-    y-axis "HumanEval %" 0 --> 100
-    bar [88, 92, 85]
+    title "Your Dynamic Chart Title"
+    x-axis ["Item 1", "Item 2", "Item 3", ...]
+    y-axis "Metric Name" 0 --> MaxValue
+    bar [val1, val2, val3, ...]
 ```
 Do not use placeholder text. Use the actual facts and numbers from the research phase.
 For this renderer, prefer a real HTML `<table>` because table markup is preserved reliably.
