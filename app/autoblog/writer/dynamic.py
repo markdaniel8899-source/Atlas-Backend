@@ -9,7 +9,9 @@ validator expects.
 from __future__ import annotations
 
 import html as html_lib
+import json
 import re
+import urllib.parse
 from typing import Any
 
 from app.autoblog.internal_links import ensure_internal_links
@@ -148,6 +150,12 @@ RULES:
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
 - section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no <img>, no tables, no Mermaid blocks, no chart markup. Pure prose only.
 - FORBIDDEN: Do NOT generate ANY HTML tables, Mermaid charts, or <img> tags. Write ONLY pure text with H1/H2/H3 headings and paragraphs.
+- VISUAL HINTS (MANDATORY):
+  As you write, you MUST insert the following invisible HTML comments at logical points where visuals are needed:
+  1. Use <!-- VISUAL: table --> before a section listing specs, features, or pricing.
+  2. Use <!-- VISUAL: chart --> before a section comparing numbers, growth, or market share.
+  3. Use <!-- VISUAL: image --> after the first 400 words if the section is mostly theory/concepts.
+  Do not write the actual tables or charts. Just place these hints.
 - conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
 - faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
 - chart: MUST be null. Visuals will be added in a separate pass.
@@ -930,86 +938,132 @@ async def generate_pure_text(
     )
     return draft
 
-
 async def inject_visuals_smartly(
     draft: DynamicArticleDraft,
     fact_sheet: FactSheet,
     keywords: KeywordPlan,
 ) -> DynamicArticleDraft:
-    """NODE 2: Inject visuals into pure text using fast model (gemini-1.5-flash-latest)."""
-    import google.generativeai as genai
-    from app.autoblog.config.settings import get_autoblog_settings
-    from app.autoblog.images.dynamic import inject_content_images, ImageResult
-
-    settings = get_autoblog_settings()
-    has_data = len(fact_sheet.numbers) >= 3
+    """NODE 2: Inject visuals into pure text by parsing VISUAL hints."""
+    from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
 
     content_html = draft.content_html
-    visual_count = 0
 
-    if has_data and fact_sheet.numbers:
-        # DATA MODE: Inject 1 table + 1 mermaid chart (2 visuals max)
-        # Build table from fact_sheet numbers
-        table_rows = []
-        for item in fact_sheet.numbers[:6]:
-            table_rows.append({
-                "metric": item.get("context", ""),
-                "value": f"{item.get('value', '')} {item.get('unit', '')}",
-                "source": item.get("source_url", "")
-            })
+    # Helper: Build HTML table from fact_sheet numbers
+    def _build_table_from_data(numbers: list[dict]) -> str:
+        rows = []
+        for item in numbers[:6]:
+            metric = item.get("context", "")
+            value = f"{item.get('value', '')} {item.get('unit', '')}"
+            source = item.get("source_url", "")
+            if metric and value:
+                rows.append({"metric": metric, "value": value, "source": source})
+        
+        if not rows:
+            return ""
+        
+        table_html = "<table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody>"
+        for row in rows:
+            table_html += f"<tr><td>{html_lib.escape(row['metric'])}</td><td>{html_lib.escape(row['value'])}</td><td>"
+            if row["source"]:
+                table_html += f"<a href='{html_lib.escape(row['source'], quote=True)}' target='_blank' rel='noopener'>Source</a>"
+            table_html += "</td></tr>"
+        table_html += "</tbody></table>"
+        return table_html
 
-        if table_rows:
-            # Generate HTML table
-            table_html = "<table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody>"
-            for row in table_rows:
-                table_html += f"<tr><td>{html_lib.escape(row['metric'])}</td><td>{html_lib.escape(row['value'])}</td><td><a href='{html_lib.escape(row['source'], quote=True)}' target='_blank' rel='noopener'>Source</a></td></tr>"
-            table_html += "</tbody></table>"
+    # Helper: Build QuickChart.io bar chart URL from numbers
+    def _build_quickchart_url(numbers: list[dict]) -> str:
+        labels = []
+        values = []
+        for item in numbers[:6]:
+            metric = item.get("context", "").strip()
+            try:
+                val = float(str(item.get("value", "")).replace(",", "").replace("%", "").split()[0])
+                if metric and val is not None:
+                    # Truncate label to 15 chars
+                    labels.append(f'"{html_lib.escape(metric[:15])}"')
+                    values.append(str(val))
+            except (ValueError, IndexError):
+                continue
+        
+        if not labels or not values:
+            return ""
+        
+        chart_config = {
+            "type": "bar",
+            "data": {
+                "labels": [l.strip('"') for l in labels],
+                "datasets": [{
+                    "label": "Value",
+                    "data": [float(v) for v in values],
+                    "backgroundColor": "rgba(59, 130, 246, 0.8)"
+                }]
+            },
+            "options": {
+                "plugins": {"legend": {"display": False}},
+                "scales": {"y": {"beginAtZero": True, "max": max([float(v) for v in values]) * 1.2}}
+            }
+        }
+        import urllib.parse
+        return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}"
 
-            # Generate Mermaid xychart-beta
-            labels = [f'"{html_lib.escape(r["metric"][:30])}"' for r in table_rows]
-            values = []
-            for r in table_rows:
-                try:
-                    val = float(str(r["value"]).replace(",", "").replace("%", "").split()[0])
-                except (ValueError, IndexError):
-                    val = 0
-                values.append(str(val))
-
-            mermaid_html = (
-                "```mermaid\n"
-                "xychart-beta\n"
-                f'    title "{html_lib.escape(fact_sheet.raw_snippets[0] if fact_sheet.raw_snippets else "Data Chart")}"\n'
-                f"    x-axis [{', '.join(labels)}]\n"
-                f"    y-axis \"Value\" 0 --> {max(values) if values else 100}\n"
-                f"    bar [{', '.join(values)}]\n"
-                "```"
-            )
-
-            # Find best H2 section to inject after (first H2 that contains data-related keywords)
+    # Process hints in order
+    content_html = draft.content_html
+    
+    # 1. Replace <!-- VISUAL: table --> with HTML table
+    if "<!-- VISUAL: table -->" in content_html:
+        table_html = _build_table_from_data(fact_sheet.numbers)
+        if table_html:
+            content_html = content_html.replace("<!-- VISUAL: table -->", f"\n{table_html}\n", 1)
+    
+    # 2. Replace <!-- VISUAL: chart --> with QuickChart.io image
+    if "<!-- VISUAL: chart -->" in content_html:
+        chart_url = _build_quickchart_url(fact_sheet.numbers)
+        if chart_url:
+            chart_img = f'<img src="{chart_url}" alt="Data Chart" loading="lazy" style="max-width:100%;height:auto;" />'
+            content_html = content_html.replace("<!-- VISUAL: chart -->", f"\n{chart_img}\n", 1)
+    
+    # 3. Replace <!-- VISUAL: image --> with Pixabay image (or skip if no data)
+    if "<!-- VISUAL: image -->" in content_html:
+        try:
+            from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
+            images = await fetch_content_image(draft.title, keywords.primary_keyword, count=1)
+            if images:
+                img = images[0]
+                img_html = f'<img src="{img.url}" alt="{html_lib.escape(img.caption)}" loading="lazy" style="max-width:100%;height:auto;" />'
+                content_html = content_html.replace("<!-- VISUAL: image -->", f"\n{img_html}\n", 1)
+            else:
+                content_html = content_html.replace("<!-- VISUAL: image -->", "", 1)
+        except Exception:
+            content_html = content_html.replace("<!-- VISUAL: image -->", "", 1)
+    
+    # Fallback: If no hints found but has data, inject table+chart after first H2
+    if not ("<!-- VISUAL:" in content_html) and len(fact_sheet.numbers) >= 3:
+        table_html = _build_table_from_data(fact_sheet.numbers)
+        chart_url = _build_quickchart_url(fact_sheet.numbers)
+        if table_html or chart_url:
             h2_matches = list(re.finditer(r"</h2>", content_html, re.IGNORECASE))
             if h2_matches:
+                visual_block = ""
+                if table_html:
+                    visual_block += f"\n{table_html}\n"
+                if chart_url:
+                    visual_block += f'\n<img src="{chart_url}" alt="Data Chart" loading="lazy" style="max-width:100%;height:auto;" />\n'
                 insert_pos = h2_matches[0].end()
-                visual_block = f"\n{table_html}\n{mermaid_html}\n"
                 content_html = content_html[:insert_pos] + visual_block + content_html[insert_pos:]
-                visual_count += 2
-    else:
-        # NEWS MODE: Inject up to 2 images after 1st and 3rd H2
-        from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
+    
+    # Fallback for news mode: inject up to 2 images after 1st and 3rd H2
+    elif "<!-- VISUAL:" not in content_html and len(fact_sheet.numbers) < 3:
         try:
-            images = await fetch_content_image(
-                draft.title,
-                keywords.primary_keyword,
-                count=2
-            )
+            from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
+            images = await fetch_content_image(draft.title, keywords.primary_keyword, count=2)
             if images:
                 image_results = [
                     ImageResult(url=img.url, caption=img.caption, provider_id="")
                     for img in images
                 ]
                 content_html = inject_content_images(content_html, image_results, keyword=keywords.primary_keyword, positions=(0, 2))
-                visual_count += len(images)
         except Exception:
-            pass  # Fail silently, keep text-only
+            pass
 
     # Apply FAQ filler strip
     content_html = _strip_banned_phrases(content_html)
