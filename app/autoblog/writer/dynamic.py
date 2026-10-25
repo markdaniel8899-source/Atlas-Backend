@@ -69,13 +69,14 @@ Required schema:
 VISUALS REQUIREMENT (MANDATORY FOR DATA/COMPARISON TOPICS):
 If the topic involves financial data, benchmarks, comparisons, or statistics, you MUST generate the visuals directly in the content:
 1. DATA TABLE: Create a clean, well-formatted HTML or Markdown table with realistic, researched metrics.
-2. MERMAID CHART: Immediately after the table, include a Mermaid.js code block representing the data, for example:
+2. MERMAID CHART: Immediately after the table, include a Mermaid.js code block. MANDATORY: Wrap it in ```mermaid and ``` code blocks. Example:
 ```mermaid
-pie title Market Share
-  "Nvidia" : 88
-  "AMD" : 12
+xychart-beta
+    title "Model Comparison"
+    x-axis [GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro]
+    y-axis "HumanEval %" 0 --> 100
+    bar [88, 92, 85]
 ```
-Use `xychart-beta` for bar or line charts when that fits the data better.
 Do not use placeholder text. Use the actual facts and numbers from the research phase.
 For this renderer, prefer a real HTML `<table>` because table markup is preserved reliably.
 
@@ -88,7 +89,7 @@ RULES:
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
 - section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1> and no <img> tags. HTML tables and Mermaid blocks are allowed for data topics.
 - conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
-- faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers.
+- faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
 - chart: only when the fact sheet contains at least 3 real numbers. Labels must name the metrics, values must be numbers, source_url must come from the fact sheet
 - Use the primary keyword in the first 100 words, in at least 2 section headings, and once in the conclusion
 - HUMAN FLOW: vary sentence length and rhythm. Mix short, punchy sentences (5-12 words) with longer explanatory ones (18-30 words). Do not start three consecutive sentences with the same subject, and avoid starting every paragraph with the subject. Use natural transitions such as "Still," "In practice," "That said," "For students," and "The catch is."
@@ -111,12 +112,29 @@ Return ONLY a valid JSON object with the same content and these keys:
 title, meta_title, meta_description, excerpt, tags, intro, sections, conclusion, faq, chart.
 Preserve every HTML table and Mermaid block exactly. Do not add commentary. Do not wrap the JSON in markdown fences."""
 
+_BANNED_FAQ_PHRASES: tuple[str, ...] = (
+    "students should verify claims",
+    "the next step is to try",
+    "a useful check is to compare",
+    "the answer depends on the task",
+)
+
+def _strip_banned_phrases(text: str) -> str:
+    """Remove any banned filler phrases from FAQ answers."""
+    for phrase in _BANNED_FAQ_PHRASES:
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        text = pattern.sub("", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"^\s*[.,;:]\s*", "", text)
+    text = re.sub(r"\s*[.,;:]\s*$", "", text)
+    return text.strip()
+
 
 _FILLER_SENTENCES: tuple[str, ...] = (
-    "The answer depends on the task, the evidence, and whether the result holds up in practice.",
-    "Students should verify claims against the original source and keep their own notes.",
-    "The next step is to try one small workflow change and measure the result.",
-    "A useful check is to compare the output with the source and note what changed.",
+    "The evidence points to a clear conclusion you can act on.",
+    "The data supports a specific outcome you can measure.",
+    "The result is a concrete takeaway you can apply immediately.",
+    "The benchmark gives you a definitive reference point.",
 )
 
 _FAQ_CLOSERS: tuple[str, ...] = (
@@ -385,7 +403,7 @@ CHART DECISION: {"include a chart object grounded in the numbers above" if has_n
 TARGET LENGTH: {TARGET_MIN_WORDS}-{TARGET_MAX_WORDS} words of body content.
 
 QUALITY REMINDERS:
-- Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers.
+- Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
 - Every external citation must be a full HTML anchor with a real URL from the fact sheet, never the bare word "source".
 - Vary sentence length and paragraph openings. Mix short and long sentences; do not start every paragraph with the subject.
 {issue_block}
@@ -488,6 +506,7 @@ def _normalize_answer(
 
     if not clean.endswith((".", "!", "?")):
         clean += "."
+    clean = _strip_banned_phrases(clean)
     return clean
 
 
