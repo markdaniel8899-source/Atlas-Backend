@@ -142,7 +142,7 @@ def get_autoblog_settings() -> AutoBlogSettings:
         ),
         gemini_model=(
             os.getenv("GEMINI_MODEL", "").strip()
-            or os.getenv("BLOG_MODEL", "gemini-1.5-flash-latest").strip()
+            or os.getenv("BLOG_MODEL", "gemini-2.5-flash").strip()
         ),
 
         # Groq (GROQ_API_KEY is accepted as a fallback for the dedicated blog key)
