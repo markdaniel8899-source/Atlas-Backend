@@ -153,7 +153,8 @@ def get_autoblog_settings() -> AutoBlogSettings:
         groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip(),
         groq_blog_model=(
             os.getenv("GROQ_RESEARCH_MODEL", "").strip()
-            or os.getenv("GROQ_BLOG_MODEL", "llama-3.1-70b-versatile").strip()
+            or os.getenv("GROQ_BLOG_MODEL", "").strip()
+            or "openai/gpt-oss-120b"
         ),
 
         # Tavily

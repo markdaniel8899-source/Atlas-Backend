@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from requests.exceptions import HTTPError
 import google.generativeai as genai
 
 from app.autoblog.config.settings import get_autoblog_settings
@@ -169,8 +170,11 @@ async def groq_research(
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
         )
-    except BlogPipelineError as exc:
-        logger.warning(f"[AutoBlog] Groq research failed, falling back to Nemotron: {exc}")
+    except (BlogPipelineError, HTTPError) as exc:
+        logger.warning(
+            f"Primary LLM failed with {type(exc).__name__}: {exc}. "
+            "Triggering fallback..."
+        )
         return await nemotron_chat(system, prompt, temperature=temperature, max_tokens=max_tokens)
 
 
