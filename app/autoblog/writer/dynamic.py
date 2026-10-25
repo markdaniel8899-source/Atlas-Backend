@@ -147,6 +147,7 @@ RULES:
 - intro: 2 short paragraphs, no heading. Answer the reader's core question in the first 2 sentences (AEO)
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
 - section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no <img>, no tables, no Mermaid blocks, no chart markup. Pure prose only.
+- FORBIDDEN: Do NOT generate ANY HTML tables, Mermaid charts, or <img> tags. Write ONLY pure text with H1/H2/H3 headings and paragraphs.
 - conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
 - faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
 - chart: MUST be null. Visuals will be added in a separate pass.
