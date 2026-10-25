@@ -27,15 +27,17 @@ from app.autoblog.publisher.seo import publish_seo_post
 from app.autoblog.research import FactSheet
 from app.autoblog.research.trends import research_with_groq
 from app.autoblog.seo import validate_article
-from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
+from app.autoblog.visuals.intelligent_injector import (
+    analyze_content_needs,
+    generate_dynamic_visual,
+    inject_visuals_intelligently,
+)
 from app.autoblog.writer.dynamic import (
     generate_pure_text,
-    inject_visuals_smartly,
     write_dynamic_article,
     word_count,
 )
 from app.autoblog.images import fetch_cover_image
-from app.autoblog.images.dynamic import inject_content_images, ImageResult
 
 
 # Global lock - only one pipeline run at a time
@@ -93,9 +95,30 @@ async def run_pipeline() -> dict[str, Any] | None:
                 attempt=1,
             )
 
-            # ─── Step 4: Visual injection (Node 2) ───
-            print("[AutoBlog] Step 4/7: Injecting visuals smartly...", flush=True)
-            draft = await inject_visuals_smartly(draft, fact_sheet, keywords)
+            # ─── Step 4: Visual injection (Intelligent Visual Injector) ───
+            print("[AutoBlog] Step 4/7: Injecting visuals intelligently...", flush=True)
+
+            # Step 4a: Analyze content for visual needs
+            visual_needs = await analyze_content_needs(
+                draft.content_html, fact_sheet.raw_snippets, fact_sheet, keywords
+            )
+
+            # Step 4b: Generate visuals for each need
+            generated_visuals = []
+            for req in visual_needs:
+                visual = await generate_dynamic_visual(req, fact_sheet, keywords)
+                if visual.get("html"):
+                    generated_visuals.append(visual)
+
+            # Step 4c: Inject visuals intelligently
+            final_html = inject_visuals_intelligently(draft.content_html, generated_visuals, fact_sheet, keywords)
+            draft.content_html = final_html
+            draft.word_count = word_count(final_html)
+
+            print(
+                f"[AutoBlog] Step 4 complete: injected {len(generated_visuals)} visual(s)",
+                flush=True,
+            )
 
             # ─── Step 4b: Cover image fetch ───
             print("[AutoBlog] Step 4b/7: Fetching cover image...", flush=True)
@@ -126,7 +149,7 @@ async def run_pipeline() -> dict[str, Any] | None:
                     f"rewriting to fix {len(validation.issues)} issue(s).",
                     flush=True,
                 )
-                # Regenerate pure text with issues, then re-inject visuals
+                # Regenerate pure text with issues, then re-inject visuals intelligently
                 draft = await generate_pure_text(
                     trend,
                     keywords,
@@ -135,7 +158,18 @@ async def run_pipeline() -> dict[str, Any] | None:
                     issues=validation.issues,
                     attempt=attempt,
                 )
-                draft = await inject_visuals_smartly(draft, fact_sheet, keywords)
+                # Re-analyze and re-inject visuals
+                visual_needs = await analyze_content_needs(
+                    draft.content_html, fact_sheet.raw_snippets, fact_sheet, keywords
+                )
+                generated_visuals = []
+                for req in visual_needs:
+                    visual = await generate_dynamic_visual(req, fact_sheet, keywords)
+                    if visual.get("html"):
+                        generated_visuals.append(visual)
+                final_html = inject_visuals_intelligently(draft.content_html, generated_visuals, fact_sheet, keywords)
+                draft.content_html = final_html
+                draft.word_count = word_count(final_html)
                 meta = build_meta(trend, draft, keywords)
                 validation = validate_article(
                     title=draft.title,
