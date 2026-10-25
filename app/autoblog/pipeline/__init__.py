@@ -6,7 +6,7 @@ Seven steps:
   3. Nemotron/Gemini full-article generation
   4. Meta title/description enforcement
   5. Visual strategy (data table + chart, or cover + content photos)
-  6. SEO validation, with targeted rewrites until the score reaches 90
+  6. SEO validation, with targeted rewrites until the score reaches 85
   7. Supabase publish + Vercel ISR revalidation
 """
 

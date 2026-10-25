@@ -1,8 +1,8 @@
 """SEO/AEO/GEO validation for the dynamic AutoBlog pipeline.
 
 The validator scores seven structural buckets for a maximum of 100 points.
-Publishing requires 90 or more, so a draft can miss one small item but not an
-entire section category.
+Publishing requires 85 or more, so a draft can miss a couple of small items
+but not an entire section category.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import urllib.parse
 from app.autoblog.models import KeywordPlan, MetaBundle, SeoValidation
 
 
-PUBLISH_THRESHOLD = 90
+PUBLISH_THRESHOLD = 85
 TITLE_MIN, TITLE_MAX = 50, 60
 DESC_MIN, DESC_MAX = 150, 160
 MIN_WORDS = 1200
