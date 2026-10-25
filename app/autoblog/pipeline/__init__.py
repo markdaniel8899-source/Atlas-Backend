@@ -22,9 +22,8 @@ from app.autoblog.config.settings import get_autoblog_settings
 from app.autoblog.internal_links import gather_internal_links
 from app.autoblog.keywords import generate_keyword_plan
 from app.autoblog.meta import build_meta
-from app.autoblog.models import TopicTrend
 from app.autoblog.publisher.seo import publish_seo_post
-from app.autoblog.research import FactSheet
+from app.autoblog.research.trends import research_with_groq
 from app.autoblog.seo import validate_article
 from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
 from app.autoblog.writer.dynamic import write_dynamic_article, word_count
@@ -53,87 +52,12 @@ async def run_pipeline() -> dict[str, Any] | None:
             settings = get_autoblog_settings()
             print(f"[AutoBlog] dynamic pipeline start {_utc_iso()}", flush=True)
 
-            # ─── Step 1: Hardcoded data-visual topic ───
-            print("[AutoBlog] Step 1/7: Using hardcoded data-visual topic...", flush=True)
-
-            # TODO: REMOVE THIS HARDCODED TOPIC AFTER TESTING VISUALS
-            topic = {
-                "headline": "Nvidia vs AMD: Q3 2026 AI Chip Market Share and Revenue Benchmark",
-                "category": "financial_benchmark",
-                "why_now": "Both companies released their Q3 2026 earnings.",
-                "key_data_points": [
-                    "Nvidia Revenue: $35.2B",
-                    "AMD Revenue: $8.5B",
-                    "Nvidia Market Share: 88%",
-                    "AMD Market Share: 12%",
-                ],
-            }
-
-            nvidia_source = (
-                "https://investor.nvidia.com/financial-info/quarterly-results/default.aspx"
+            # ─── Step 1: Dynamic trend discovery + research ───
+            print(
+                "[AutoBlog] Step 1/7: Discovering a trend and researching facts...",
+                flush=True,
             )
-            amd_source = "https://ir.amd.com/financial-information/quarterly-results"
-
-            trend = TopicTrend(
-                headline=topic["headline"],
-                angle=(
-                    "Compare Nvidia and AMD's Q3 2026 AI chip revenue and market "
-                    "share to quantify Nvidia's lead."
-                ),
-                category=topic["category"],
-                why_now=topic["why_now"],
-                search_intent="commercial",
-            )
-            fact_sheet = FactSheet(
-                claims=[
-                    "Nvidia reported $35.2B in Q3 2026 revenue.",
-                    "AMD reported $8.5B in Q3 2026 revenue.",
-                    "Nvidia held 88% of the AI chip market in Q3 2026.",
-                    "AMD held 12% of the AI chip market in Q3 2026.",
-                ],
-                numbers=[
-                    {
-                        "value": "35.2",
-                        "unit": "USD billion",
-                        "context": "Nvidia Q3 2026 revenue",
-                        "source_url": nvidia_source,
-                    },
-                    {
-                        "value": "8.5",
-                        "unit": "USD billion",
-                        "context": "AMD Q3 2026 revenue",
-                        "source_url": amd_source,
-                    },
-                    {
-                        "value": "88",
-                        "unit": "%",
-                        "context": "Nvidia AI chip market share",
-                        "source_url": nvidia_source,
-                    },
-                    {
-                        "value": "12",
-                        "unit": "%",
-                        "context": "AMD AI chip market share",
-                        "source_url": amd_source,
-                    },
-                ],
-                entities=[
-                    {
-                        "name": "Nvidia",
-                        "type": "company",
-                        "context": "AI chip market leader",
-                        "source_url": nvidia_source,
-                    },
-                    {
-                        "name": "AMD",
-                        "type": "company",
-                        "context": "AI chip challenger",
-                        "source_url": amd_source,
-                    },
-                ],
-                source_urls=[nvidia_source, amd_source],
-                raw_snippets=topic["key_data_points"],
-            )
+            trend, fact_sheet, _raw_results = await research_with_groq()
 
             print(
                 f"[AutoBlog] Step 1 complete: {trend.headline!r}, "

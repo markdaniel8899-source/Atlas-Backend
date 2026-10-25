@@ -38,7 +38,7 @@ FAQ_MAX_WORDS = 60
 
 _SYSTEM = """You are the lead writer for ATLAS, an AI learning OS for students.
 
-Write one complete, publish-ready article as strict JSON. No markdown fences, no commentary.
+Write one complete, publish-ready article as strict JSON. Do not wrap the JSON itself in markdown fences. Mermaid fenced blocks inside section HTML are allowed and required for data topics.
 
 Required schema:
 {
@@ -66,6 +66,19 @@ Required schema:
   }
 }
 
+VISUALS REQUIREMENT (MANDATORY FOR DATA/COMPARISON TOPICS):
+If the topic involves financial data, benchmarks, comparisons, or statistics, you MUST generate the visuals directly in the content:
+1. DATA TABLE: Create a clean, well-formatted HTML or Markdown table with realistic, researched metrics.
+2. MERMAID CHART: Immediately after the table, include a Mermaid.js code block representing the data, for example:
+```mermaid
+pie title Market Share
+  "Nvidia" : 88
+  "AMD" : 12
+```
+Use `xychart-beta` for bar or line charts when that fits the data better.
+Do not use placeholder text. Use the actual facts and numbers from the research phase.
+For this renderer, prefer a real HTML `<table>` because table markup is preserved reliably.
+
 RULES:
 - title: 45-65 characters, specific, no clickbait, no colon-stuffed keyword string
 - meta_title: 50-60 characters and starts with the primary keyword
@@ -73,15 +86,17 @@ RULES:
 - excerpt: 140-160 characters, plain text
 - intro: 2 short paragraphs, no heading. Answer the reader's core question in the first 2 sentences (AEO)
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
-- section html: 120-260 words each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no images
+- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1> and no <img> tags. HTML tables and Mermaid blocks are allowed for data topics.
 - conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
-- faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Every answer must end with a different, answer-specific takeaway. NEVER reuse the same closing sentence, phrase, or template across answers.
+- faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers.
 - chart: only when the fact sheet contains at least 3 real numbers. Labels must name the metrics, values must be numbers, source_url must come from the fact sheet
 - Use the primary keyword in the first 100 words, in at least 2 section headings, and once in the conclusion
 - HUMAN FLOW: vary sentence length and rhythm. Mix short, punchy sentences (5-12 words) with longer explanatory ones (18-30 words). Do not start three consecutive sentences with the same subject, and avoid starting every paragraph with the subject. Use natural transitions such as "Still," "In practice," "That said," "For students," and "The catch is."
 - Include 2-4 external links to source URLs. Use exactly this HTML shape: <a href="https://example.com/page" target="_blank" rel="noopener">descriptive anchor text</a>. Every citation must be a real anchor with a URL from the fact sheet. When citing, never write the bare word "source" or a raw URL as plain text.
 - Include 2 internal links from the supplied list using relative hrefs
-- Insert the exact marker <!--DATA_VISUAL--> after a paragraph in the section where the chart belongs
+- For data/comparison topics, place the HTML table and the Mermaid block inside the most relevant section HTML, with the Mermaid block immediately after the table.
+- Insert the exact marker <!--DATA_VISUAL--> after a paragraph in the section where the chart belongs only when you are not including both an HTML table and a Mermaid chart; the fallback visual builder uses this marker.
+- Escape newlines inside JSON string values so the returned JSON stays valid.
 - Ground every claim, number and quote in the fact sheet. Never invent data, studies or quotes
 - BANNED words: delve, moreover, furthermore, additionally, in conclusion, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm
 - NEVER use em dashes or en dashes. Use commas, colons, or parentheses
@@ -94,14 +109,14 @@ _REPAIR_SYSTEM = """You repair malformed JSON from another language model.
 
 Return ONLY a valid JSON object with the same content and these keys:
 title, meta_title, meta_description, excerpt, tags, intro, sections, conclusion, faq, chart.
-Do not add commentary. Do not wrap the JSON in markdown fences."""
+Preserve every HTML table and Mermaid block exactly. Do not add commentary. Do not wrap the JSON in markdown fences."""
 
 
 _FILLER_SENTENCES: tuple[str, ...] = (
-    "The practical test is whether it improves recall, saves time, or makes feedback more specific.",
+    "The answer depends on the task, the evidence, and whether the result holds up in practice.",
     "Students should verify claims against the original source and keep their own notes.",
-    "Treat the tool as a tutor that asks better questions, not as a replacement for thinking.",
     "The next step is to try one small workflow change and measure the result.",
+    "A useful check is to compare the output with the source and note what changed.",
 )
 
 _FAQ_CLOSERS: tuple[str, ...] = (
@@ -110,7 +125,6 @@ _FAQ_CLOSERS: tuple[str, ...] = (
     "Judge the feedback quality, not the polish of the demo.",
     "Measure the result against how you studied before.",
     "Keep a short log of what actually changed.",
-    "The practical test is whether the tool improves recall, saves time, or sharpens feedback.",
     "Students should compare the new workflow with their old routine and note what changed.",
     "A small trial with a clear before-and-after comparison is safer than a broad overhaul.",
 )
@@ -134,9 +148,72 @@ def word_count(html_text: str) -> int:
     return len(_strip_tags(html_text).split())
 
 
+_MERMAID_FENCE_RE = re.compile(
+    r"```mermaid[ \t]*\r?\n?(.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+_MERMAID_CODE_RE = re.compile(
+    r"""<pre\b[^>]*>\s*<code\b[^>]*\bclass\s*=\s*["'][^"']*language-mermaid[^"']*["'][^>]*>(.*?)</code>\s*</pre>""",
+    re.IGNORECASE | re.DOTALL,
+)
+_MARKDOWN_TABLE_RE = re.compile(
+    r"(?m)(?:^[ \t]*\|.*\|[ \t]*\r?\n)"
+    r"(?:^[ \t]*\|[ \t:|-]+\|[ \t]*\r?\n)"
+    r"(?:^[ \t]*\|.*\|[ \t]*(?:\r?\n|$))+",
+)
+
+
+def _mermaid_block(code: str) -> str:
+    decoded = html_lib.unescape(str(code or "")).strip()
+    if not decoded:
+        return ""
+    return f'<pre class="mermaid">{html_lib.escape(decoded)}</pre>'
+
+
+def _normalize_mermaid_blocks(fragment: str) -> str:
+    """Convert fenced Mermaid source into a preserveable HTML block."""
+    clean = _MERMAID_FENCE_RE.sub(
+        lambda match: _mermaid_block(match.group(1)),
+        str(fragment or ""),
+    )
+    return _MERMAID_CODE_RE.sub(
+        lambda match: _mermaid_block(match.group(1)),
+        clean,
+    )
+
+
+def _markdown_table_block(source: str) -> str:
+    lines = [line.strip() for line in source.strip().splitlines()]
+    if len(lines) < 3:
+        return source
+
+    def cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    header = cells(lines[0])
+    rows = [cells(line) for line in lines[2:]]
+    if not header or any(len(row) != len(header) for row in rows):
+        return source
+
+    head_html = "".join(f"<th>{html_lib.escape(cell)}</th>" for cell in header)
+    body_html = "".join(
+        "<tr>" + "".join(f"<td>{html_lib.escape(cell)}</td>" for cell in row) + "</tr>"
+        for row in rows
+    )
+    return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+
+
+def _normalize_markdown_tables(fragment: str) -> str:
+    return _MARKDOWN_TABLE_RE.sub(
+        lambda match: _markdown_table_block(match.group(0)),
+        str(fragment or ""),
+    )
+
+
 def _sanitize_fragment(fragment: str) -> str:
     """Strip dangerous or duplicate-document tags from an LLM HTML fragment."""
-    clean = str(fragment or "").strip()
+    clean = _normalize_mermaid_blocks(str(fragment or "").strip())
+    clean = _normalize_markdown_tables(clean)
     clean = re.sub(
         r"<(script|style|iframe|form|input)\b[^>]*>.*?</\1>",
         "",
@@ -313,7 +390,7 @@ CHART DECISION: {"include a chart object grounded in the numbers above" if has_n
 TARGET LENGTH: {TARGET_MIN_WORDS}-{TARGET_MAX_WORDS} words of body content.
 
 QUALITY REMINDERS:
-- FAQ answers must end differently. Never repeat a closing sentence across answers.
+- Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers.
 - Every external citation must be a full HTML anchor with a real URL from the fact sheet, never the bare word "source".
 - Vary sentence length and paragraph openings. Mix short and long sentences; do not start every paragraph with the subject.
 {issue_block}
@@ -404,7 +481,7 @@ def _normalize_answer(
         for filler in _FILLER_SENTENCES:
             if used_fillers is not None and filler in used_fillers:
                 continue
-            candidate = f"{clean} {filler}".strip()
+            candidate = f"{filler} {clean}".strip()
             if len(candidate.split()) <= FAQ_MAX_WORDS:
                 clean = candidate
                 if used_fillers is not None:
@@ -603,7 +680,22 @@ def _parse_chart(raw_chart: Any, fact_sheet: FactSheet) -> dict[str, Any] | None
     }
 
 
+def _has_native_data_visuals(content_html: str) -> bool:
+    has_table = bool(re.search(r"<table\b", content_html, re.IGNORECASE))
+    has_mermaid = bool(
+        re.search(
+            r"""<[a-z][^>]*\bclass\s*=\s*["'][^"']*\bmermaid\b""",
+            content_html,
+            re.IGNORECASE,
+        )
+        or re.search(r"```mermaid\b", content_html, re.IGNORECASE)
+    )
+    return has_table and has_mermaid
+
+
 def _ensure_data_marker(content_html: str, chart: dict[str, Any] | None) -> str:
+    if _has_native_data_visuals(content_html):
+        return content_html.replace("<!--DATA_VISUAL-->", "")
     if not chart or "<!--DATA_VISUAL-->" in content_html:
         return content_html
     faq_match = re.search(

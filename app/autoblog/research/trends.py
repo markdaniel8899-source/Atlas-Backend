@@ -426,9 +426,15 @@ async def run_trend_research() -> tuple[TopicTrend, FactSheet, list[dict[str, st
     return trend, fact_sheet, raw_results
 
 
+async def research_with_groq() -> tuple[TopicTrend, FactSheet, list[dict[str, str]]]:
+    """Run dynamic Groq trend discovery followed by Tavily fact research."""
+    return await run_trend_research()
+
+
 __all__ = [
     "discover_trending_topics",
     "select_best_topic",
     "research_topic",
+    "research_with_groq",
     "run_trend_research",
 ]

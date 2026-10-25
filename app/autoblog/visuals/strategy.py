@@ -91,6 +91,21 @@ def _has_numeric_data(fact_sheet: FactSheet) -> bool:
     return len(values) >= 3
 
 
+def _has_html_table(content_html: str) -> bool:
+    return bool(re.search(r"<table\b", content_html, re.IGNORECASE))
+
+
+def _has_mermaid_chart(content_html: str) -> bool:
+    return bool(
+        re.search(
+            r"""<[a-z][^>]*\bclass\s*=\s*["'][^"']*\bmermaid\b""",
+            content_html,
+            re.IGNORECASE,
+        )
+        or re.search(r"```mermaid\b", content_html, re.IGNORECASE)
+    )
+
+
 def _cover_fallback(headline: str) -> tuple[str, str]:
     index = sum(ord(char) for char in headline) % len(UNSPLASH_FALLBACK_IMAGES)
     return UNSPLASH_FALLBACK_IMAGES[index], f"unsplash:topic_{index}"
@@ -476,7 +491,15 @@ def assemble_content(
     """Inject data visuals, content photos and internal links into the draft."""
     html_text = draft.content_html
 
-    visual_html = "\n".join(payload.html for payload in strategy.data_visuals if payload.html)
+    has_table = _has_html_table(html_text)
+    has_mermaid = _has_mermaid_chart(html_text)
+    visual_html = "\n".join(
+        payload.html
+        for payload in strategy.data_visuals
+        if payload.html
+        and not (payload.kind == "table" and has_table)
+        and not (payload.kind == "chart" and has_mermaid)
+    )
     if visual_html:
         if "<!--DATA_VISUAL-->" in html_text:
             html_text = html_text.replace("<!--DATA_VISUAL-->", visual_html, 1)
@@ -495,6 +518,8 @@ def assemble_content(
                 )
             else:
                 html_text = f"{html_text}\n{visual_html}"
+
+    html_text = html_text.replace("<!--DATA_VISUAL-->", "")
 
     image_results = [
         ImageResult(url=image["url"], caption=image["caption"], provider_id="")
