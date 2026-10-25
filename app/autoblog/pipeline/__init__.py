@@ -22,8 +22,9 @@ from app.autoblog.config.settings import get_autoblog_settings
 from app.autoblog.internal_links import gather_internal_links
 from app.autoblog.keywords import generate_keyword_plan
 from app.autoblog.meta import build_meta
+from app.autoblog.models import TopicTrend
 from app.autoblog.publisher.seo import publish_seo_post
-from app.autoblog.research.trends import research_with_groq
+from app.autoblog.research import FactSheet
 from app.autoblog.seo import validate_article
 from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
 from app.autoblog.writer.dynamic import write_dynamic_article, word_count
@@ -52,12 +53,133 @@ async def run_pipeline() -> dict[str, Any] | None:
             settings = get_autoblog_settings()
             print(f"[AutoBlog] dynamic pipeline start {_utc_iso()}", flush=True)
 
-            # ─── Step 1: Dynamic trend discovery + research ───
+            # ─── Step 1: Hardcoded 3-way model benchmark ───
             print(
-                "[AutoBlog] Step 1/7: Discovering a trend and researching facts...",
+                "[AutoBlog] Step 1/7: Using hardcoded 3-way model benchmark topic...",
                 flush=True,
             )
-            trend, fact_sheet, _raw_results = await research_with_groq()
+
+            # TODO: REMOVE THIS HARDCODED TEST TOPIC
+            topic = {
+                "headline": "GPT-4o vs Claude 3.5 Sonnet vs Gemini 1.5 Pro: The 2026 Developer Benchmark",
+                "category": "benchmark_comparison",
+                "why_now": "New independent benchmarks reveal significant shifts in coding accuracy and pricing.",
+                "key_data_points": [
+                    "GPT-4o: 88% HumanEval, $5/1M tokens, 128k context",
+                    "Claude 3.5 Sonnet: 92% HumanEval, $3/1M tokens, 200k context",
+                    "Gemini 1.5 Pro: 85% HumanEval, $1.25/1M tokens, 1M+ context",
+                ],
+            }
+
+            openai_source = "https://openai.com/api/pricing/"
+            anthropic_source = "https://www.anthropic.com/pricing"
+            google_source = "https://ai.google.dev/gemini-api/docs/pricing"
+            humaneval_source = "https://github.com/openai/human-eval"
+
+            trend = TopicTrend(
+                headline=topic["headline"],
+                angle=(
+                    "Compare GPT-4o, Claude 3.5 Sonnet, and Gemini 1.5 Pro on "
+                    "coding accuracy, token pricing, and context window to "
+                    "identify the best developer value in 2026."
+                ),
+                category=topic["category"],
+                why_now=topic["why_now"],
+                search_intent="commercial",
+            )
+            fact_sheet = FactSheet(
+                claims=[
+                    "GPT-4o scored 88% on HumanEval, costs $5 per 1M tokens, "
+                    "and supports a 128k context window.",
+                    "Claude 3.5 Sonnet scored 92% on HumanEval, costs $3 per "
+                    "1M tokens, and supports a 200k context window.",
+                    "Gemini 1.5 Pro scored 85% on HumanEval, costs $1.25 per "
+                    "1M tokens, and supports a 1M+ context window.",
+                ],
+                numbers=[
+                    {
+                        "value": "88",
+                        "unit": "%",
+                        "context": "GPT-4o HumanEval score",
+                        "source_url": humaneval_source,
+                    },
+                    {
+                        "value": "5",
+                        "unit": "USD per 1M tokens",
+                        "context": "GPT-4o API price",
+                        "source_url": openai_source,
+                    },
+                    {
+                        "value": "128000",
+                        "unit": "tokens",
+                        "context": "GPT-4o context window",
+                        "source_url": openai_source,
+                    },
+                    {
+                        "value": "92",
+                        "unit": "%",
+                        "context": "Claude 3.5 Sonnet HumanEval score",
+                        "source_url": humaneval_source,
+                    },
+                    {
+                        "value": "3",
+                        "unit": "USD per 1M tokens",
+                        "context": "Claude 3.5 Sonnet API price",
+                        "source_url": anthropic_source,
+                    },
+                    {
+                        "value": "200000",
+                        "unit": "tokens",
+                        "context": "Claude 3.5 Sonnet context window",
+                        "source_url": anthropic_source,
+                    },
+                    {
+                        "value": "85",
+                        "unit": "%",
+                        "context": "Gemini 1.5 Pro HumanEval score",
+                        "source_url": humaneval_source,
+                    },
+                    {
+                        "value": "1.25",
+                        "unit": "USD per 1M tokens",
+                        "context": "Gemini 1.5 Pro API price",
+                        "source_url": google_source,
+                    },
+                    {
+                        "value": "1000000",
+                        "unit": "tokens",
+                        "context": "Gemini 1.5 Pro context window",
+                        "source_url": google_source,
+                    },
+                ],
+                entities=[
+                    {
+                        "name": "GPT-4o",
+                        "type": "AI model",
+                        "context": "OpenAI model in the comparison",
+                        "source_url": openai_source,
+                    },
+                    {
+                        "name": "Claude 3.5 Sonnet",
+                        "type": "AI model",
+                        "context": "Anthropic model in the comparison",
+                        "source_url": anthropic_source,
+                    },
+                    {
+                        "name": "Gemini 1.5 Pro",
+                        "type": "AI model",
+                        "context": "Google model in the comparison",
+                        "source_url": google_source,
+                    },
+                ],
+                source_urls=[
+                    openai_source,
+                    anthropic_source,
+                    google_source,
+                    humaneval_source,
+                ],
+                raw_snippets=topic["key_data_points"],
+            )
 
             print(
                 f"[AutoBlog] Step 1 complete: {trend.headline!r}, "
