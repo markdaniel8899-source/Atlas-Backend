@@ -141,24 +141,14 @@ Required schema:
 }
 
 RULES:
-- STRICT LENGTH REQUIREMENT: The article MUST be at least 900 words long. Expand on examples, add detailed explanations, and ensure comprehensive coverage to meet this length. Do not write short, superficial content.
+- STRICT LENGTH REQUIREMENT: The article MUST be at least 1250 words long. Expand on examples, add detailed explanations, and ensure comprehensive coverage to meet this length. Do not write short, superficial content.
 - title: 45-65 characters, specific, no clickbait, no colon-stuffed keyword string
 - meta_title: 50-60 characters and starts with the primary keyword
 - meta_description: 150-160 characters, contains the primary keyword and one clear call to action
 - excerpt: 140-160 characters, plain text
 - intro: 2 short paragraphs, no heading. Answer the reader's core question in the first 2 sentences (AEO)
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
-- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1> and no <img> tags. HTML tables ARE allowed when listing specs, pricing, or comparisons. Mermaid blocks and chart markup are forbidden.
-- TABLE FORMATTING (MANDATORY): When listing specs, pricing, or comparisons, you MUST use proper HTML table format with <table>, <thead>, <tbody>, <tr>, <th>, <td> tags. Example:
-  <table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody><tr><td>Revenue</td><td>$35B</td><td>Source</td></tr><tr><td>Growth</td><td>+45%</td><td>Source</td></tr></tbody></table>
-  NEVER use plain text like "Metric | Value | Source". Always use proper HTML table tags.
-- FORBIDDEN: Do NOT generate Mermaid charts or <img> tags. Write pure text with H1/H2/H3 headings, paragraphs, and HTML tables for data.
-- VISUAL HINTS (MANDATORY):
-  As you write, you MUST insert the following invisible HTML comments at logical points where visuals are needed:
-  1. Use <!-- VISUAL: table --> before a section listing specs, features, or pricing.
-  2. Use <!-- VISUAL: chart --> before a section comparing numbers, growth, or market share.
-  3. Use <!-- VISUAL: image --> after the first 400 words if the section is mostly theory/concepts.
-  Do not write the actual tables or charts. Just place these hints.
+- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no <img>, no tables, no Mermaid blocks, no chart markup. Pure prose only.
 - conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
 - faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
 - chart: MUST be null. Visuals will be added in a separate pass.
@@ -168,6 +158,7 @@ RULES:
 - Include 2 internal links from the supplied list using relative hrefs
 - Escape newlines inside JSON string values so the returned JSON stays valid.
 - Ground every claim, number and quote in the fact sheet. Never invent data, studies or quotes
+- Write concrete numbers, dates, names and comparisons in plain sentences, always attributed to a source in fact_sheet. Never invent a figure. If a number is not in the fact sheet, do not state it.
 - BANNED words: delve, moreover, furthermore, additionally, in conclusion, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm
 - NEVER use em dashes or en dashes. Use commas, colons, or parentheses
 - Write for curious students, not for search engines
@@ -192,7 +183,7 @@ FORMATTING RULES (MANDATORY):
 RULES:
 - MAX 3 visual elements TOTAL in final output.
 - DATA/COMPARISON TOPICS (has hard numbers): Inject exactly ONE clean HTML <table> and ONE ```mermaid xychart-beta``` chart block. Place them immediately after the most relevant H2 section. Use EXACT categories/values from the research data. Wrap Mermaid in ```mermaid ... ```.
-- GENERAL NEWS TOPICS (no hard numbers): Inject up to TWO <img src="..." alt="..."> tags. Place after 1st and 3rd H2 headings. Use provided image URLs.
+- GENERAL NEWS TOPICS (no hard numbers): Inject up to TWO <img src=\"[URL]\" alt=\"[alt]\"> tags. Place after 1st and 3rd H2 headings. Use provided image URLs.
 - NEVER add visuals if research has no supporting data.
 - DO NOT modify article text, headings, or FAQs. ONLY inject visual markup.
 - Return the complete article HTML with visuals injected.

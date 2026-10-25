@@ -13,6 +13,7 @@ from app.autoblog.images import fetch_content_image
 from app.autoblog.images.dynamic import ImageResult, inject_content_images
 from app.autoblog.models import KeywordPlan, TopicTrend
 from app.autoblog.research import FactSheet
+from app.autoblog.visuals.labels import clean_label
 
 
 class VisualIntelligence:
@@ -102,29 +103,16 @@ class VisualIntelligence:
         return table_html, rows
 
     def _build_chart_url(self, numbers: list[dict]) -> str:
-        """Build QuickChart.io URL with clean, truncated labels."""
+        """Build QuickChart.io URL with clean, truncated labels using clean_label."""
         labels = []
         values = []
-        label_map = {
-            "total donations by elon musk": "Musk Donations",
-            "approximate amount musk spent": "Trump Support",
-            "amount openai is aiming to raise": "OpenAI Raise",
-            "pre-money valuation targeted": "Pre-Money Val",
-            "valuation mentioned in earlier report": "Earlier Val",
-        }
-
         for item in numbers[:6]:
             metric = item.get("context", "").strip().lower()
             try:
                 val = float(str(item.get("value", "")).replace(",", "").replace("%", "").split()[0])
                 if val is not None:
-                    label = metric
-                    for k, v in label_map.items():
-                        if k in metric:
-                            label = v
-                            break
-                    if len(label) > 15:
-                        label = label[:12] + "..."
+                    # Use clean_label for automatic cleaning and truncation
+                    label = clean_label(item.get("context", ""), max_len=15)
                     labels.append(f'"{html_lib.escape(label)}"')
                     values.append(str(val))
             except (ValueError, IndexError):
@@ -230,7 +218,7 @@ async def analyze_content_needs(text: str, key_data_points: list[str], fact_shee
 
 async def generate_dynamic_visual(req: dict, fact_sheet: FactSheet, keywords: KeywordPlan) -> dict:
     """Standalone function for pipeline integration."""
-    vi = VisualIntelligence(keywords, req.get("fact_sheet", FactSheet()))
+    vi = VisualIntelligence(keywords, fact_sheet)
     return await vi.generate_dynamic_visual(req)
 
 
