@@ -79,6 +79,7 @@ xychart-beta
     y-axis "Metric Name" 0 --> MaxValue
     bar [val1, val2, val3, ...]
 ```
+CRITICAL: You MUST ONLY use the facts, numbers, and entities provided in the research step. DO NOT invent random models, stats, or charts (e.g., do not add medical data to a software article). If no hard data exists, DO NOT generate a chart. If you do generate a chart, it MUST be wrapped in ```mermaid and ``` code blocks.
 Do not use placeholder text. Use the actual facts and numbers from the research phase.
 For this renderer, prefer a real HTML `<table>` because table markup is preserved reliably.
 
@@ -119,6 +120,11 @@ _BANNED_FAQ_PHRASES: tuple[str, ...] = (
     "the next step is to try",
     "a useful check is to compare",
     "the answer depends on the task",
+    "the evidence points to",
+    "the next step is to",
+    "students should verify",
+    "a useful check is",
+    "the practical test is",
 )
 
 def _strip_banned_phrases(text: str) -> str:
@@ -835,6 +841,22 @@ async def write_dynamic_article(
         meta_description_raw=_clean_text(data.get("meta_description"), 300),
         excerpt_raw=_clean_text(data.get("excerpt"), 300),
         chart_spec=chart,
+    )
+
+    content_html = _strip_banned_phrases(draft.content_html)
+    draft = DynamicArticleDraft(
+        title=draft.title,
+        intro_html=draft.intro_html,
+        sections=draft.sections,
+        conclusion_html=draft.conclusion_html,
+        faq=draft.faq,
+        tags=draft.tags,
+        content_html=content_html,
+        word_count=word_count(content_html),
+        meta_title_raw=draft.meta_title_raw,
+        meta_description_raw=draft.meta_description_raw,
+        excerpt_raw=draft.excerpt_raw,
+        chart_spec=draft.chart_spec,
     )
 
     print(

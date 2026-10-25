@@ -29,6 +29,7 @@ from app.autoblog.research.trends import research_with_groq
 from app.autoblog.seo import validate_article
 from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
 from app.autoblog.writer.dynamic import write_dynamic_article, word_count
+from app.autoblog.images.dynamic import inject_content_images, ImageResult
 
 
 # Global lock - only one pipeline run at a time
@@ -171,8 +172,14 @@ async def run_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # ─── Step 7: Publish + revalidate ───
+# ─── Step 7: Publish + revalidate ───
             print("[AutoBlog] Step 7/7: Publishing to Supabase + Vercel...", flush=True)
+
+            # Ensure content images are injected into the article body
+            draft.content_html = _inject_content_images(
+                draft.content_html, content_images, keywords.primary_keyword
+            )
+
             post = await publish_seo_post(
                 article=draft,
                 meta=meta,
@@ -213,6 +220,25 @@ def run_scheduled_job() -> None:
             print("[AutoBlog] scheduled run exited gracefully")
     except Exception as exc:
         print(f"[AutoBlog] scheduled run failed: {type(exc).__name__}: {exc}")
+
+
+def _inject_content_images(
+    html_text: str,
+    content_images: list[dict[str, str]],
+    keyword: str,
+) -> str:
+    """Inject content images after the 1st and 3rd H2 headings.
+    Falls back to inserting after first paragraph if not enough H2s."""
+    if not content_images:
+        return html_text
+
+    from app.autoblog.images.dynamic import inject_content_images, ImageResult
+
+    image_results = [
+        ImageResult(url=img["url"], caption=img["caption"], provider_id="")
+        for img in content_images
+    ]
+    return inject_content_images(html_text, image_results, keyword=keyword, positions=(0, 2))
 
 
 def _utc_iso() -> str:
