@@ -34,6 +34,7 @@ from app.autoblog.writer.dynamic import (
     write_dynamic_article,
     word_count,
 )
+from app.autoblog.images import fetch_cover_image
 from app.autoblog.images.dynamic import inject_content_images, ImageResult
 
 
@@ -95,6 +96,13 @@ async def run_pipeline() -> dict[str, Any] | None:
             # ─── Step 4: Visual injection (Node 2) ───
             print("[AutoBlog] Step 4/7: Injecting visuals smartly...", flush=True)
             draft = await inject_visuals_smartly(draft, fact_sheet, keywords)
+
+            # ─── Step 4b: Cover image fetch ───
+            print("[AutoBlog] Step 4b/7: Fetching cover image...", flush=True)
+            cover_image_url = await fetch_cover_image(
+                draft.title,
+                [keywords.primary_keyword, *keywords.secondary_keywords[:3]],
+            )
 
             # ─── Step 5: Meta ───
             print("[AutoBlog] Step 5/7: Enforcing meta tags...", flush=True)
@@ -159,7 +167,7 @@ async def run_pipeline() -> dict[str, Any] | None:
                 article=draft,
                 meta=meta,
                 keywords=keywords,
-                cover_image_url=None,
+                cover_image_url=cover_image_url,
                 content_images=[],
                 seo_score=validation.total,
             )

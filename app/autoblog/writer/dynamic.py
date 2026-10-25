@@ -161,9 +161,12 @@ RULES:
 - Return ONLY the JSON object
 """
 
-_VISUAL_INJECTOR_SYSTEM = """You are a visual intelligence agent for ATLAS. Your job is to inject visuals into a finished article.
-
-Input: (1) The complete article HTML, (2) Research key_data_points with numbers/entities/sources.
+_VISUAL_INJECTOR_SYSTEM = """DYNAMIC VISUAL RULES:
+Analyze the provided `key_data_points` and the text. 
+1. CHARTS: If there are 2 or more comparable numerical entities (e.g., prices, scores, percentages), generate a Mermaid `xychart-beta` or `pie` chart. The x-axis labels and data values MUST dynamically match the EXACT number of items in the data (whether 2, 3, 4, or 5). 
+2. TABLES: If the data contains specifications, features, or lists, generate a clean HTML `<table>`.
+3. IMAGES: For general news, inject up to 2 `<img>` tags after relevant H2 headings.
+4. STRICT NO-HALLUCINATION: NEVER invent data, models, or numbers. If the provided `key_data_points` do not contain clear, structured data, DO NOT generate a chart or table. Leave the text as is.
 
 RULES:
 - MAX 3 visual elements TOTAL in final output.
@@ -996,6 +999,16 @@ async def inject_visuals_smartly(
 
     # Apply FAQ filler strip
     content_html = _strip_banned_phrases(content_html)
+
+    # Aggressive FAQ filler regex cleanup
+    _AGGRESSIVE_FAQ_REGEX = re.compile(
+        r"(?i)(the data supports|a clear conclusion you can act on|the benchmark gives you|the result is a concrete takeaway|students should verify|the practical test is|a useful check is|the evidence points to)",
+        re.IGNORECASE,
+    )
+    content_html = _AGGRESSIVE_FAQ_REGEX.sub("", content_html)
+    content_html = re.sub(r"\s{2,}", " ", content_html)
+    content_html = re.sub(r"^\s*[.,;:]\s*", "", content_html)
+    content_html = re.sub(r"\s*[.,;:]\s*$", "", content_html)
 
     draft = DynamicArticleDraft(
         title=draft.title,
