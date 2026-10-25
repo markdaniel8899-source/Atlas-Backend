@@ -28,7 +28,12 @@ from app.autoblog.research import FactSheet
 from app.autoblog.research.trends import research_with_groq
 from app.autoblog.seo import validate_article
 from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
-from app.autoblog.writer.dynamic import write_dynamic_article, word_count
+from app.autoblog.writer.dynamic import (
+    generate_pure_text,
+    inject_visuals_smartly,
+    write_dynamic_article,
+    word_count,
+)
 from app.autoblog.images.dynamic import inject_content_images, ImageResult
 
 
@@ -76,10 +81,10 @@ async def run_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-            # ─── Step 3: Full article ───
-            print("[AutoBlog] Step 3/7: Writing the article...", flush=True)
+            # ─── Step 3: Pure text article (Node 1) ───
+            print("[AutoBlog] Step 3/7: Writing pure text article...", flush=True)
             internal_links = await gather_internal_links(4)
-            draft = await write_dynamic_article(
+            draft = await generate_pure_text(
                 trend,
                 keywords,
                 fact_sheet,
@@ -87,32 +92,13 @@ async def run_pipeline() -> dict[str, Any] | None:
                 attempt=1,
             )
 
-            # ─── Step 4: Meta ───
-            print("[AutoBlog] Step 4/7: Enforcing meta tags...", flush=True)
-            meta = build_meta(trend, draft, keywords)
+            # ─── Step 4: Visual injection (Node 2) ───
+            print("[AutoBlog] Step 4/7: Injecting visuals smartly...", flush=True)
+            draft = await inject_visuals_smartly(draft, fact_sheet, keywords)
 
-            # ─── Step 5: Visuals ───
-            print("[AutoBlog] Step 5/7: Preparing visuals...", flush=True)
-            strategy = await build_visual_strategy(
-                trend,
-                keywords,
-                fact_sheet,
-                draft,
-            )
-            content_html, content_images = assemble_content(
-                draft,
-                strategy,
-                internal_links,
-                keyword=keywords.primary_keyword,
-            )
-            draft.content_html = content_html
-            draft.word_count = word_count(content_html)
-            print(
-                f"[AutoBlog] Step 5 complete: mode={strategy.mode}, "
-                f"{len(strategy.data_visuals)} data visual(s), "
-                f"{len(content_images)} content image(s)",
-                flush=True,
-            )
+            # ─── Step 5: Meta ───
+            print("[AutoBlog] Step 5/7: Enforcing meta tags...", flush=True)
+            meta = build_meta(trend, draft, keywords)
 
             # ─── Step 6: Validation loop ───
             print("[AutoBlog] Step 6/7: SEO validation...", flush=True)
@@ -132,7 +118,8 @@ async def run_pipeline() -> dict[str, Any] | None:
                     f"rewriting to fix {len(validation.issues)} issue(s).",
                     flush=True,
                 )
-                draft = await write_dynamic_article(
+                # Regenerate pure text with issues, then re-inject visuals
+                draft = await generate_pure_text(
                     trend,
                     keywords,
                     fact_sheet,
@@ -140,15 +127,8 @@ async def run_pipeline() -> dict[str, Any] | None:
                     issues=validation.issues,
                     attempt=attempt,
                 )
+                draft = await inject_visuals_smartly(draft, fact_sheet, keywords)
                 meta = build_meta(trend, draft, keywords)
-                content_html, content_images = assemble_content(
-                    draft,
-                    strategy,
-                    internal_links,
-                    keyword=keywords.primary_keyword,
-                )
-                draft.content_html = content_html
-                draft.word_count = word_count(content_html)
                 validation = validate_article(
                     title=draft.title,
                     content_html=draft.content_html,
@@ -172,20 +152,15 @@ async def run_pipeline() -> dict[str, Any] | None:
                 flush=True,
             )
 
-# ─── Step 7: Publish + revalidate ───
+    # ─── Step 7: Publish + revalidate ───
             print("[AutoBlog] Step 7/7: Publishing to Supabase + Vercel...", flush=True)
-
-            # Ensure content images are injected into the article body
-            draft.content_html = _inject_content_images(
-                draft.content_html, content_images, keywords.primary_keyword
-            )
 
             post = await publish_seo_post(
                 article=draft,
                 meta=meta,
                 keywords=keywords,
-                cover_image_url=strategy.cover_url,
-                content_images=content_images,
+                cover_image_url=None,
+                content_images=[],
                 seo_score=validation.total,
             )
 

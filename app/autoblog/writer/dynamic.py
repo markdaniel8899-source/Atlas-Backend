@@ -115,6 +115,71 @@ Return ONLY a valid JSON object with the same content and these keys:
 title, meta_title, meta_description, excerpt, tags, intro, sections, conclusion, faq, chart.
 Preserve every HTML table and Mermaid block exactly. Do not add commentary. Do not wrap the JSON in markdown fences."""
 
+_PURE_TEXT_SYSTEM = """You are the lead writer for ATLAS, an AI learning OS for students.
+
+Write one complete, publish-ready article as strict JSON. Do not wrap the JSON itself in markdown fences.
+
+Required schema:
+{
+  "title": "...",
+  "meta_title": "...",
+  "meta_description": "...",
+  "excerpt": "...",
+  "tags": ["...", "..."],
+  "intro": "<p>...</p>",
+  "sections": [
+    {"heading": "...", "level": 2, "html": "<p>...</p><ul>...</ul>"},
+    {"heading": "...", "level": 3, "html": "<p>...</p>"}
+  ],
+  "conclusion": "<h2>...</h2><p>...</p>",
+  "faq": [
+    {"question": "...", "answer": "..."}
+  ],
+  "chart": null
+}
+
+RULES:
+- title: 45-65 characters, specific, no clickbait, no colon-stuffed keyword string
+- meta_title: 50-60 characters and starts with the primary keyword
+- meta_description: 150-160 characters, contains the primary keyword and one clear call to action
+- excerpt: 140-160 characters, plain text
+- intro: 2 short paragraphs, no heading. Answer the reader's core question in the first 2 sentences (AEO)
+- sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
+- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no <img>, no tables, no Mermaid blocks, no chart markup. Pure prose only.
+- conclusion: starts with <h2> and summarises the practical takeaway in 80-140 words
+- faq: exactly 4 questions. Each answer MUST be 40-60 words, direct, plain text (no HTML). Each FAQ answer must end with a UNIQUE, specific insight related to that exact question. DO NOT repeat phrases like "The practical test is whether..." or "Treat the tool as a tutor..." across different answers. STRICT RULE: Do NOT use generic filler sentences in FAQ answers. You are BANNED from using phrases like: "Students should verify claims", "The next step is to try", "A useful check is to compare", or "The answer depends on the task". Each answer must end with a direct, specific fact related to that exact question.
+- chart: MUST be null. Visuals will be added in a separate pass.
+- Use the primary keyword in the first 100 words, in at least 2 section headings, and once in the conclusion
+- HUMAN FLOW: vary sentence length and rhythm. Mix short, punchy sentences (5-12 words) with longer explanatory ones (18-30 words). Do not start three consecutive sentences with the same subject, and avoid starting every paragraph with the subject. Use natural transitions such as "Still," "In practice," "That said," "For students," and "The catch is."
+- Include 2-4 external links to source URLs. Use exactly this HTML shape: <a href="https://example.com/page" target="_blank" rel="noopener">descriptive anchor text</a>. Every citation must be a real anchor with a URL from the fact sheet. When citing, never write the bare word "source" or a raw URL as plain text.
+- Include 2 internal links from the supplied list using relative hrefs
+- Escape newlines inside JSON string values so the returned JSON stays valid.
+- Ground every claim, number and quote in the fact sheet. Never invent data, studies or quotes
+- BANNED words: delve, moreover, furthermore, additionally, in conclusion, it's worth noting, it is important to note, in today's fast-paced world, ever-evolving landscape, landscape of, tapestry, testament, unlock, unleash, dive deep, dive into, game-changer, revolutionize, revolutionary, seamless, robust, cutting-edge, elevate, harness the power, in a world where, boasts, myriad, plethora, navigating, embarking, fostering, realm
+- NEVER use em dashes or en dashes. Use commas, colons, or parentheses
+- Write for curious students, not for search engines
+- Return ONLY the JSON object
+"""
+
+_VISUAL_INJECTOR_SYSTEM = """You are a visual intelligence agent for ATLAS. Your job is to inject visuals into a finished article.
+
+Input: (1) The complete article HTML, (2) Research key_data_points with numbers/entities/sources.
+
+RULES:
+- MAX 3 visual elements TOTAL in final output.
+- DATA/COMPARISON TOPICS (has hard numbers): Inject exactly ONE clean HTML <table> and ONE ```mermaid xychart-beta``` chart block. Place them immediately after the most relevant H2 section. Use EXACT categories/values from the research data. Wrap Mermaid in ```mermaid ... ```.
+- GENERAL NEWS TOPICS (no hard numbers): Inject up to TWO <img src="..." alt="..."> tags. Place after 1st and 3rd H2 headings. Use provided image URLs.
+- NEVER add visuals if research has no supporting data.
+- DO NOT modify article text, headings, or FAQs. ONLY inject visual markup.
+- Return the complete article HTML with visuals injected.
+"""
+
+_REPAIR_SYSTEM = """You repair malformed JSON from another language model.
+
+Return ONLY a valid JSON object with the same content and these keys:
+title, meta_title, meta_description, excerpt, tags, intro, sections, conclusion, faq, chart.
+Preserve every HTML table and Mermaid block exactly. Do not add commentary. Do not wrap the JSON in markdown fences."""
+
 _BANNED_FAQ_PHRASES: tuple[str, ...] = (
     "students should verify claims",
     "the next step is to try",
@@ -750,6 +815,203 @@ def _sanitize_tags(raw_tags: Any, keywords: KeywordPlan) -> list[str]:
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
+
+
+async def generate_pure_text(
+    trend: TopicTrend,
+    keywords: KeywordPlan,
+    fact_sheet: FactSheet,
+    links: list[InternalLink],
+    *,
+    issues: list[str] | None = None,
+    attempt: int = 1,
+) -> DynamicArticleDraft:
+    """NODE 1: Generate pure text content (prose, structure, FAQs) without any visuals."""
+    prompt = _build_prompt(trend, keywords, fact_sheet, links, issues, attempt)
+
+    result = await nemotron_with_gemini_fallback(
+        _PURE_TEXT_SYSTEM,
+        prompt,
+        temperature=0.55 if attempt == 1 else 0.35,
+        max_tokens=8000,
+    )
+
+    try:
+        data = _parse_payload(result.text)
+    except Exception:
+        print("[AutoBlog] Writer JSON invalid - requesting a Gemini repair pass.", flush=True)
+        repair = await gemini_final_pass(
+            _REPAIR_SYSTEM,
+            result.text[:20000],
+            temperature=0.0,
+            max_tokens=8000,
+        )
+        data = _parse_payload(repair.text)
+
+    title = _clean_text(data.get("title") or trend.headline, 120)
+    if not title:
+        title = trend.headline
+
+    intro = _sanitize_fragment(str(data.get("intro") or data.get("introduction") or ""))
+    intro = _strip_leading_heading(intro)
+    if not intro:
+        intro = f"<p>{html_lib.escape(trend.angle)}</p>"
+
+    if not _keyword_in(intro, keywords.primary_keyword):
+        display = html_lib.escape(_display_keyword(keywords.primary_keyword))
+        intro = (
+            f"<p>{display} is changing how students learn and work with AI.</p>\n{intro}"
+        )
+
+    sections = _build_sections(data.get("sections"))
+    if not sections:
+        raise BlogPipelineError("Writer returned no usable article sections.")
+
+    conclusion = _sanitize_fragment(str(data.get("conclusion") or ""))
+    if not conclusion:
+        conclusion = (
+            f"<h2>Final takeaway</h2>"
+            f"<p>{html_lib.escape(trend.angle)}. The practical next step is to test one "
+            f"small workflow change, measure the result, and keep what works.</p>"
+        )
+    elif not re.search(r"<h2\b", conclusion, re.IGNORECASE):
+        conclusion = f"<h2>Final takeaway</h2>\n{conclusion}"
+
+    faq = _build_faq(data.get("faq"), trend, keywords, fact_sheet)
+    faq_html = "<h2>FAQ</h2>\n" + "\n".join(
+        f"<h3>{html_lib.escape(item['question'])}</h3>"
+        f"<p>{html_lib.escape(item['answer'])}</p>"
+        for item in faq
+    )
+
+    # Build pure text content (no visuals, no chart marker)
+    content_html = "\n".join(
+        [intro, *(section["html"] for section in sections), conclusion, faq_html]
+    )
+    content_html = ensure_external_links(content_html, fact_sheet, minimum=2)
+    content_html = ensure_internal_links(content_html, links, minimum=2)
+
+    draft = DynamicArticleDraft(
+        title=title,
+        intro_html=intro,
+        sections=sections,
+        conclusion_html=conclusion,
+        faq=faq,
+        tags=_sanitize_tags(data.get("tags"), keywords),
+        content_html=content_html,
+        word_count=word_count(content_html),
+        meta_title_raw=_clean_text(data.get("meta_title"), 200),
+        meta_description_raw=_clean_text(data.get("meta_description"), 300),
+        excerpt_raw=_clean_text(data.get("excerpt"), 300),
+        chart_spec=None,
+    )
+
+    print(
+        f"[AutoBlog] Pure text draft ready: {draft.word_count} words, "
+        f"{len(sections)} sections, {len(faq)} FAQs",
+        flush=True,
+    )
+    return draft
+
+
+async def inject_visuals_smartly(
+    draft: DynamicArticleDraft,
+    fact_sheet: FactSheet,
+    keywords: KeywordPlan,
+) -> DynamicArticleDraft:
+    """NODE 2: Inject visuals into pure text using fast model (gemini-1.5-flash-latest)."""
+    import google.generativeai as genai
+    from app.autoblog.config.settings import get_autoblog_settings
+    from app.autoblog.images.dynamic import inject_content_images, ImageResult
+
+    settings = get_autoblog_settings()
+    has_data = len(fact_sheet.numbers) >= 3
+
+    content_html = draft.content_html
+    visual_count = 0
+
+    if has_data and fact_sheet.numbers:
+        # DATA MODE: Inject 1 table + 1 mermaid chart (2 visuals max)
+        # Build table from fact_sheet numbers
+        table_rows = []
+        for item in fact_sheet.numbers[:6]:
+            table_rows.append({
+                "metric": item.get("context", ""),
+                "value": f"{item.get('value', '')} {item.get('unit', '')}",
+                "source": item.get("source_url", "")
+            })
+
+        if table_rows:
+            # Generate HTML table
+            table_html = "<table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody>"
+            for row in table_rows:
+                table_html += f"<tr><td>{html_lib.escape(row['metric'])}</td><td>{html_lib.escape(row['value'])}</td><td><a href='{html_lib.escape(row['source'], quote=True)}' target='_blank' rel='noopener'>Source</a></td></tr>"
+            table_html += "</tbody></table>"
+
+            # Generate Mermaid xychart-beta
+            labels = [f'"{html_lib.escape(r["metric"][:30])}"' for r in table_rows]
+            values = []
+            for r in table_rows:
+                try:
+                    val = float(str(r["value"]).replace(",", "").replace("%", "").split()[0])
+                except (ValueError, IndexError):
+                    val = 0
+                values.append(str(val))
+
+            mermaid_html = (
+                "```mermaid\n"
+                "xychart-beta\n"
+                f'    title "{html_lib.escape(fact_sheet.raw_snippets[0] if fact_sheet.raw_snippets else "Data Chart")}"\n'
+                f"    x-axis [{', '.join(labels)}]\n"
+                f"    y-axis \"Value\" 0 --> {max(values) if values else 100}\n"
+                f"    bar [{', '.join(values)}]\n"
+                "```"
+            )
+
+            # Find best H2 section to inject after (first H2 that contains data-related keywords)
+            h2_matches = list(re.finditer(r"</h2>", content_html, re.IGNORECASE))
+            if h2_matches:
+                insert_pos = h2_matches[0].end()
+                visual_block = f"\n{table_html}\n{mermaid_html}\n"
+                content_html = content_html[:insert_pos] + visual_block + content_html[insert_pos:]
+                visual_count += 2
+    else:
+        # NEWS MODE: Inject up to 2 images after 1st and 3rd H2
+        from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
+        try:
+            images = await fetch_content_image(
+                draft.title,
+                keywords.primary_keyword,
+                count=2
+            )
+            if images:
+                image_results = [
+                    ImageResult(url=img.url, caption=img.caption, provider_id="")
+                    for img in images
+                ]
+                content_html = inject_content_images(content_html, image_results, keyword=keywords.primary_keyword, positions=(0, 2))
+                visual_count += len(images)
+        except Exception:
+            pass  # Fail silently, keep text-only
+
+    # Apply FAQ filler strip
+    content_html = _strip_banned_phrases(content_html)
+
+    draft = DynamicArticleDraft(
+        title=draft.title,
+        intro_html=draft.intro_html,
+        sections=draft.sections,
+        conclusion_html=draft.conclusion_html,
+        faq=draft.faq,
+        tags=draft.tags,
+        content_html=content_html,
+        word_count=word_count(content_html),
+        meta_title_raw=draft.meta_title_raw,
+        meta_description_raw=draft.meta_description_raw,
+        excerpt_raw=draft.excerpt_raw,
+        chart_spec=None,
+    )
+    return draft
 
 
 async def write_dynamic_article(
