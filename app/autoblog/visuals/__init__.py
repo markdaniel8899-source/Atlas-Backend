@@ -90,8 +90,12 @@ def render_table(vis: dict[str, Any]) -> str:
     parts.extend([
         "</tbody></table>",
         f'<figcaption>{caption}</figcaption>',
-        f'<div class="blog-visual-source">Source: <a href="{source_url}" rel="noopener" target="_blank">{source_url}</a></div>',
     ])
+    if source_url:
+        parts.append(
+            f'<div class="blog-visual-source">Source: '
+            f'<a href="{source_url}" rel="noopener" target="_blank">{source_url}</a></div>'
+        )
 
     if intro:
         parts.append(f'<p class="blog-visual-intro">{intro}</p>')

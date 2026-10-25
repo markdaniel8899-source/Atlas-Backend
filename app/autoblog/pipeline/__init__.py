@@ -1,4 +1,14 @@
-"""Pipeline orchestrator for AutoBlog v2 - New flow with editor-planner."""
+"""Pipeline orchestrator for the dynamic SEO/AEO/GEO AutoBlog.
+
+Seven steps:
+  1. Groq trend discovery + Tavily research + fact extraction
+  2. Keyword map (primary, secondary, long-tail, LSI)
+  3. Nemotron/Gemini full-article generation
+  4. Meta title/description enforcement
+  5. Visual strategy (data table + chart, or cover + content photos)
+  6. SEO validation, with targeted rewrites until the score reaches 90
+  7. Supabase publish + Vercel ISR revalidation
+"""
 
 from __future__ import annotations
 
@@ -9,23 +19,20 @@ import traceback
 from typing import Any
 
 from app.autoblog.config.settings import get_autoblog_settings
-from app.autoblog.research import run_research, FactSheet
-from app.autoblog.planner import create_article_plan, ArticlePlan
-from app.autoblog.writer import write_article, ArticleDraft
-from app.autoblog.checks import run_gate, fix_article, GateResult, MAX_TOTAL_IMAGES
-from app.autoblog.images import fetch_cover_image, inject_images_into_content, ImageResult
-from app.autoblog.visuals import replace_visual_markers
-from app.autoblog.publisher import publish_post
-from app.autoblog.llm.clients import BlogPipelineError
+from app.autoblog.internal_links import gather_internal_links
+from app.autoblog.keywords import generate_keyword_plan
+from app.autoblog.meta import build_meta
+from app.autoblog.publisher.seo import publish_seo_post
+from app.autoblog.research.trends import run_trend_research
+from app.autoblog.seo import validate_article
+from app.autoblog.visuals.strategy import assemble_content, build_visual_strategy
+from app.autoblog.writer.dynamic import write_dynamic_article, word_count
 
 
 # Global lock - only one pipeline run at a time
 _RUN_LOCK = threading.Lock()
 
-# Timing
-RESEARCH_PAUSE_SECONDS = 2
-PLAN_PAUSE_SECONDS = 1
-WRITE_PAUSE_SECONDS = 3
+MAX_VALIDATION_ATTEMPTS = 3
 
 
 def is_run_active() -> bool:
@@ -33,156 +40,159 @@ def is_run_active() -> bool:
 
 
 async def run_pipeline() -> dict[str, Any] | None:
-    """New v2 pipeline: Research -> Plan -> Write -> Gate/Fix -> Images -> Publish."""
+    """Run the dynamic pipeline once and return the published post."""
     print("[AutoBlog] TASK STARTED EXECUTION!", flush=True)
+
     try:
         if not _RUN_LOCK.acquire(blocking=False):
             print("[AutoBlog] a run is already in progress - skipped.", flush=True)
             return None
+
         try:
-            print(f"[AutoBlog] v2 pipeline start {_utc_iso()}", flush=True)
+            settings = get_autoblog_settings()
+            print(f"[AutoBlog] dynamic pipeline start {_utc_iso()}", flush=True)
 
-            # ─── Step 1: Research (topic discovery + fact sheet) ───
-            print("[AutoBlog] Step 1: Research (queries + fact extraction)...", flush=True)
-            try:
-                settings = get_autoblog_settings()
-                # run_research handles topic discovery internally using rotating queries
-                fact_sheet, raw_results = await run_research("trending AI topic", "exploring the topic", "explainer")
-                print(f"[AutoBlog] Step 1 complete: {len(fact_sheet.claims)} claims, {len(fact_sheet.numbers)} numbers", flush=True)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                tb = _redact_secrets(tb)
-                print(f"[AutoBlog] Step 1 failed: {type(exc).__name__}: {exc}. Traceback: {tb}", flush=True)
-                return None
-            await asyncio.sleep(RESEARCH_PAUSE_SECONDS)
+            # ─── Step 1: Trend discovery + research ───
+            print("[AutoBlog] Step 1/7: Trend discovery + Tavily research...", flush=True)
+            trend, fact_sheet, _raw_results = await run_trend_research()
+            print(
+                f"[AutoBlog] Step 1 complete: {trend.headline!r}, "
+                f"{len(fact_sheet.claims)} claims, {len(fact_sheet.numbers)} numbers",
+                flush=True,
+            )
 
-            # ─── Step 2: Editor-Planner ───
-            print("[AutoBlog] Step 2: Editor-planner creating article plan...", flush=True)
-            try:
-                plan = await create_article_plan(fact_sheet)
-                print(f"[AutoBlog] Step 2 complete: {plan.topic} ({plan.article_type}, {plan.target_words} words, {len(plan.outline)} sections, {len(plan.visual_plan)} visuals, {len(plan.image_plan)} images)", flush=True)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                tb = _redact_secrets(tb)
-                print(f"[AutoBlog] Step 2 failed: {type(exc).__name__}: {exc}. Traceback: {tb}", flush=True)
-                return None
-            await asyncio.sleep(PLAN_PAUSE_SECONDS)
+            # ─── Step 2: Keywords ───
+            print("[AutoBlog] Step 2/7: Building keyword map...", flush=True)
+            keywords = await generate_keyword_plan(trend, fact_sheet)
+            print(
+                f"[AutoBlog] Step 2 complete: primary={keywords.primary_keyword!r}",
+                flush=True,
+            )
 
-            # ─── Step 3: Section-by-section Writing ───
-            print("[AutoBlog] Step 3: Writing article section by section...", flush=True)
-            try:
-                draft = await write_article(plan, fact_sheet)
-                print(f"[AutoBlog] Step 3 complete: {draft.word_count} words, title={draft.title[:60]}", flush=True)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                tb = _redact_secrets(tb)
-                print(f"[AutoBlog] Step 3 failed: {type(exc).__name__}: {exc}. Traceback: {tb}", flush=True)
-                return None
-            await asyncio.sleep(WRITE_PAUSE_SECONDS)
+            # ─── Step 3: Full article ───
+            print("[AutoBlog] Step 3/7: Writing the article...", flush=True)
+            internal_links = await gather_internal_links(4)
+            draft = await write_dynamic_article(
+                trend,
+                keywords,
+                fact_sheet,
+                internal_links,
+                attempt=1,
+            )
 
-            # ─── Step 4: Gate + Fix Loop (max 2 attempts) ───
-            print("[AutoBlog] Step 4: Quality gate...", flush=True)
-            article_data = {
-                "title": draft.title,
-                "excerpt": draft.excerpt,
-                "content_html": replace_visual_markers(
-                    "\n".join(s.html for s in draft.sections) + "\n" + draft.faq_html,
-                    draft.visuals
-                ),
-                "visuals": draft.visuals,
-                "tags": draft.tags,
-            }
+            # ─── Step 4: Meta ───
+            print("[AutoBlog] Step 4/7: Enforcing meta tags...", flush=True)
+            meta = build_meta(trend, draft, keywords)
 
-            fix_attempt = 0
-            max_fixes = 2
-            current_html = article_data["content_html"]
-            current_visuals = draft.visuals
+            # ─── Step 5: Visuals ───
+            print("[AutoBlog] Step 5/7: Preparing visuals...", flush=True)
+            strategy = await build_visual_strategy(
+                trend,
+                keywords,
+                fact_sheet,
+                draft,
+            )
+            content_html, content_images = assemble_content(
+                draft,
+                strategy,
+                internal_links,
+                keyword=keywords.primary_keyword,
+            )
+            draft.content_html = content_html
+            draft.word_count = word_count(content_html)
+            print(
+                f"[AutoBlog] Step 5 complete: mode={strategy.mode}, "
+                f"{len(strategy.data_visuals)} data visual(s), "
+                f"{len(content_images)} content image(s)",
+                flush=True,
+            )
 
-            while fix_attempt <= max_fixes:
-                gate = run_gate(
-                    current_html,
-                    article_data,
-                    draft.title,
-                    draft.excerpt,
-                    plan,
+            # ─── Step 6: Validation loop ───
+            print("[AutoBlog] Step 6/7: SEO validation...", flush=True)
+            validation = validate_article(
+                title=draft.title,
+                content_html=draft.content_html,
+                meta=meta,
+                keywords=keywords,
+                site_url=settings.site_url,
+            )
+
+            attempt = 1
+            while not validation.passed and attempt < MAX_VALIDATION_ATTEMPTS:
+                attempt += 1
+                print(
+                    f"[AutoBlog] Attempt {attempt}/{MAX_VALIDATION_ATTEMPTS}: "
+                    f"rewriting to fix {len(validation.issues)} issue(s).",
+                    flush=True,
+                )
+                draft = await write_dynamic_article(
+                    trend,
+                    keywords,
                     fact_sheet,
+                    internal_links,
+                    issues=validation.issues,
+                    attempt=attempt,
                 )
-                if gate.passed:
-                    print("[AutoBlog] Quality gate PASSED.", flush=True)
-                    break
-
-                if fix_attempt >= max_fixes:
-                    print(f"[AutoBlog] Gate FAILED after {max_fixes} fixes: {gate.reasons}. Discarding post.", flush=True)
-                    return None
-
-                print(f"[AutoBlog] Gate failed (attempt {fix_attempt + 1}/{max_fixes}): {gate.reasons}. Fixing...", flush=True)
-                current_html, article_data = fix_article(current_html, article_data, gate, plan, fact_sheet)
-                fix_attempt += 1
-
-            article_data["content_html"] = current_html
-
-            # ─── Step 5: Images (cover + content per image_plan) ───
-            print("[AutoBlog] Step 5: Fetching images...", flush=True)
-            try:
-                used_provider_ids: set[str] = set()
-                cover_result, cover_source = await fetch_cover_image(
-                    draft.title, [plan.primary_keyword] + plan.secondary_keywords, used_provider_ids
+                meta = build_meta(trend, draft, keywords)
+                content_html, content_images = assemble_content(
+                    draft,
+                    strategy,
+                    internal_links,
+                    keyword=keywords.primary_keyword,
                 )
-                used_provider_ids.add(cover_result.provider_id)
-
-                content_html, content_images, content_count = await inject_images_into_content(
-                    current_html,
-                    plan,
-                    fact_sheet,
-                    keyword=plan.primary_keyword,
-                    used_provider_ids=used_provider_ids,
-                )
-
-                # Validate total image count
-                total_images = 1 + content_count  # cover + content
-                if total_images > MAX_TOTAL_IMAGES:
-                    print(f"[AutoBlog] Total images {total_images} exceeds {MAX_TOTAL_IMAGES}, trimming content images", flush=True)
-                    content_images = content_images[:MAX_TOTAL_IMAGES - 1]
-                    content_count = len(content_images)
-
-                print(f"[AutoBlog] Step 5 complete: cover + {content_count} content images", flush=True)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                tb = _redact_secrets(tb)
-                print(f"[AutoBlog] Step 5 failed: {type(exc).__name__}: {exc}. Traceback: {tb}", flush=True)
-                return None
-
-            # ─── Step 6: Publish ───
-            print("[AutoBlog] Step 6: Publishing to Supabase...", flush=True)
-            try:
-                content_images_list = [{"url": img.url, "caption": img.caption} for img in content_images]
-                post = await publish_post(
+                draft.content_html = content_html
+                draft.word_count = word_count(content_html)
+                validation = validate_article(
                     title=draft.title,
-                    content_html=content_html,
-                    excerpt=draft.excerpt,
-                    cover_image_url=cover_result.url,
-                    content_images=content_images_list,
-                    tags=draft.tags,
-                    keywords=[plan.primary_keyword] + plan.secondary_keywords,
+                    content_html=draft.content_html,
+                    meta=meta,
+                    keywords=keywords,
+                    site_url=settings.site_url,
                 )
-                print(f"[AutoBlog] Step 6 complete: post id={post.get('id')} slug={post.get('slug')}", flush=True)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                tb = _redact_secrets(tb)
-                print(f"[AutoBlog] Step 6 failed: {type(exc).__name__}: {exc}. Traceback: {tb}", flush=True)
+
+            if not validation.passed:
+                print(
+                    f"[AutoBlog] SEO score stuck at {validation.total}/100 after "
+                    f"{MAX_VALIDATION_ATTEMPTS} attempts - discarding post. "
+                    f"Breakdown: {validation.breakdown}",
+                    flush=True,
+                )
+                print(f"[AutoBlog] Remaining issues: {validation.issues}", flush=True)
                 return None
+
+            print(
+                f"[AutoBlog] Step 6 complete: score {validation.total}/100 PASS.",
+                flush=True,
+            )
+
+            # ─── Step 7: Publish + revalidate ───
+            print("[AutoBlog] Step 7/7: Publishing to Supabase + Vercel...", flush=True)
+            post = await publish_seo_post(
+                article=draft,
+                meta=meta,
+                keywords=keywords,
+                cover_image_url=strategy.cover_url,
+                content_images=content_images,
+                seo_score=validation.total,
+            )
 
             print("[AutoBlog] TASK COMPLETED SUCCESSFULLY!", flush=True)
             return {
                 "post": post,
-                "topic": plan.topic,
-                "keywords": [plan.primary_keyword] + plan.secondary_keywords,
+                "topic": trend.headline,
+                "keywords": keywords.all_keywords(),
+                "seo_score": validation.total,
+                "seo_breakdown": validation.breakdown,
             }
         finally:
             _RUN_LOCK.release()
-    except Exception as e:
-        print(f"[AutoBlog] CRITICAL TASK ERROR: {e}", flush=True)
-        traceback.print_exc(file=sys.stdout)
+
+    except Exception as exc:
+        print(
+            f"[AutoBlog] CRITICAL TASK ERROR: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        print(_redact_secrets(traceback.format_exc()), flush=True)
         sys.stdout.flush()
         return None
 
@@ -201,19 +211,19 @@ def run_scheduled_job() -> None:
 
 def _utc_iso() -> str:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _redact_secrets(text: str) -> str:
     import re
+
     return re.sub(
-        r'(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+',
-        r'\1=***',
+        r"(?i)(api[_-]?key|secret|token|password)[\s:=]+[^\s]+",
+        r"\1=***",
         text,
     )
 
-
-# ─── Exports ──────────────────────────────────────────────────────────────────
 
 __all__ = [
     "run_pipeline",

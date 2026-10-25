@@ -1,4 +1,4 @@
-"""Scheduler for AutoBlog v2 - APScheduler integration."""
+"""Scheduler for the dynamic AutoBlog - daily at 09:00 UTC by default."""
 
 from __future__ import annotations
 
@@ -43,9 +43,13 @@ def setup_scheduler(app: FastAPI) -> None:
     )
     scheduler.start()
     app.state.autoblog_scheduler = scheduler
+
+    job = scheduler.get_job("autoblog-daily")
+    next_run = getattr(job, "next_run_time", None)
     print(
         f"[AutoBlog] scheduled - every day at "
         f"{settings.autoblog_schedule_hour:02d}:{settings.autoblog_schedule_minute:02d} UTC"
+        + (f" (next run {next_run.isoformat()})" if next_run else "")
     )
 
 

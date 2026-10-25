@@ -504,7 +504,11 @@ async def fetch_recent_posts(limit: int | None = None) -> list[dict[str, Any]]:
         )
         rows = getattr(response, "data", None)
         if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
+            return [
+                row
+                for row in rows
+                if isinstance(row, dict) and row.get("published_at")
+            ]
     except Exception as exc:
         print(
             f"[AutoBlog] recent-post lookup failed "

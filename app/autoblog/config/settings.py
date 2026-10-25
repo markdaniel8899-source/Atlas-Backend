@@ -66,6 +66,32 @@ class AutoBlogSettings:
     max_content_images: int
     max_results: int
 
+    # Publishing / ISR
+    site_url: str = "https://atlas-frontend-pearl.vercel.app"
+    vercel_revalidate_url: str = ""
+    vercel_revalidate_secret: str = ""
+    vercel_deploy_hook_url: str = ""
+
+    @property
+    def nemotron_api_key(self) -> str:
+        """Preferred alias used by the dynamic pipeline."""
+        return self.nvidia_api_key
+
+    @property
+    def gemini_api_key(self) -> str:
+        """Preferred alias used by the dynamic pipeline."""
+        return self.google_api_key
+
+    @property
+    def groq_research_api_key(self) -> str:
+        """Groq key used for trend, keyword and table research calls."""
+        return self.groq_blog_api_key
+
+    @property
+    def revalidation_ready(self) -> bool:
+        """True when at least one Vercel revalidation hook is configured."""
+        return bool(self.vercel_revalidate_url or self.vercel_deploy_hook_url)
+
     @property
     def blog_ready(self) -> bool:
         """True if all required keys for a full run are present."""
@@ -80,7 +106,7 @@ class AutoBlogSettings:
         """True if research providers are configured."""
         return bool(
             self.tavily_api_key
-            and self.nvidia_api_key
+            and (self.nvidia_api_key or self.groq_blog_api_key)
         )
 
     @property
@@ -98,19 +124,37 @@ class AutoBlogSettings:
 def get_autoblog_settings() -> AutoBlogSettings:
     """Load and cache AutoBlog settings from environment."""
     return AutoBlogSettings(
-        # NVIDIA NIM
-        nvidia_api_key=os.getenv("NVIDIA_API_KEY", "").strip(),
+        # NVIDIA NIM (NEMOTRON_* aliases take precedence)
+        nvidia_api_key=(
+            os.getenv("NEMOTRON_API_KEY", "").strip()
+            or os.getenv("NVIDIA_API_KEY", "").strip()
+        ),
         nvidia_api_url=os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1").strip(),
-        nvidia_model=os.getenv("NVIDIA_BLOG_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip(),
+        nvidia_model=(
+            os.getenv("NEMOTRON_MODEL", "").strip()
+            or os.getenv("NVIDIA_BLOG_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
+        ),
 
-        # Google Gemini
-        google_api_key=os.getenv("GOOGLE_API_KEY", "").strip(),
-        gemini_model=os.getenv("BLOG_MODEL", "gemini-1.5-pro").strip(),
+        # Google Gemini (GEMINI_* aliases take precedence)
+        google_api_key=(
+            os.getenv("GEMINI_API_KEY", "").strip()
+            or os.getenv("GOOGLE_API_KEY", "").strip()
+        ),
+        gemini_model=(
+            os.getenv("GEMINI_MODEL", "").strip()
+            or os.getenv("BLOG_MODEL", "gemini-1.5-pro").strip()
+        ),
 
-        # Groq (dedicated blog key)
-        groq_blog_api_key=os.getenv("GROQ_BLOG_API_KEY", "").strip(),
+        # Groq (GROQ_API_KEY is accepted as a fallback for the dedicated blog key)
+        groq_blog_api_key=(
+            os.getenv("GROQ_BLOG_API_KEY", "").strip()
+            or os.getenv("GROQ_API_KEY", "").strip()
+        ),
         groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip(),
-        groq_blog_model=os.getenv("GROQ_BLOG_MODEL", "llama-3.1-70b-versatile").strip(),
+        groq_blog_model=(
+            os.getenv("GROQ_RESEARCH_MODEL", "").strip()
+            or os.getenv("GROQ_BLOG_MODEL", "llama-3.1-70b-versatile").strip()
+        ),
 
         # Tavily
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
@@ -155,6 +199,12 @@ def get_autoblog_settings() -> AutoBlogSettings:
         min_content_images=int(os.getenv("MIN_CONTENT_IMAGES", "1")),
         max_content_images=int(os.getenv("MAX_CONTENT_IMAGES", "3")),
         max_results=int(os.getenv("MAX_RESULTS", "5")),
+
+        # Publishing / ISR
+        site_url=os.getenv("SITE_URL", "https://atlas-frontend-pearl.vercel.app").strip(),
+        vercel_revalidate_url=os.getenv("VERCEL_REVALIDATE_URL", "").strip(),
+        vercel_revalidate_secret=os.getenv("VERCEL_REVALIDATE_SECRET", "").strip(),
+        vercel_deploy_hook_url=os.getenv("VERCEL_DEPLOY_HOOK_URL", "").strip(),
     )
 
 

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from app.autoblog.config.settings import get_autoblog_settings
@@ -65,7 +65,9 @@ async def plan_research_queries(
     recent_titles = [p.get("title", "") for p in recent_posts[:10] if p.get("title")]
     recent_text = "\n".join(f"- {t}" for t in recent_titles) or "(none)"
 
-    prompt = f"""Topic: {topic}
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    prompt = f"""Today is {today}.
+Topic: {topic}
 Angle: {angle}
 Article Type: {article_type}
 
@@ -158,26 +160,49 @@ Extract the fact sheet now."""
     if not isinstance(data, dict):
         raise BlogPipelineError("Fact extractor returned invalid JSON.")
 
-    claims = [str(c).strip() for c in data.get("claims", []) if str(c).strip()][:15]
+    raw_claims = data.get("claims")
+    claims = (
+        [str(c).strip() for c in raw_claims if str(c).strip()][:15]
+        if isinstance(raw_claims, list)
+        else []
+    )
+
     numbers = []
-    for n in data.get("numbers", []):
-        if isinstance(n, dict) and n.get("value") and n.get("unit"):
+    raw_numbers = data.get("numbers")
+    for n in raw_numbers if isinstance(raw_numbers, list) else []:
+        if not isinstance(n, dict):
+            continue
+        value = str(n.get("value", "")).strip()
+        unit = str(n.get("unit", "")).strip()
+        if value and unit:
             numbers.append({
-                "value": str(n.get("value", "")).strip(),
-                "unit": str(n.get("unit", "")).strip(),
+                "value": value,
+                "unit": unit,
                 "context": str(n.get("context", "")).strip(),
                 "source_url": str(n.get("source_url", "")).strip(),
             })
+
     entities = []
-    for e in data.get("entities", []):
-        if isinstance(e, dict) and e.get("name"):
+    raw_entities = data.get("entities")
+    for e in raw_entities if isinstance(raw_entities, list) else []:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("name", "")).strip()
+        if name:
             entities.append({
-                "name": str(e.get("name", "")).strip(),
+                "name": name,
                 "type": str(e.get("type", "")).strip(),
                 "context": str(e.get("context", "")).strip(),
                 "source_url": str(e.get("source_url", "")).strip(),
             })
-    source_urls = [str(u).strip() for u in data.get("source_urls", []) if str(u).strip()]
+
+    raw_urls = data.get("source_urls")
+    extracted_urls = (
+        [str(u).strip() for u in raw_urls if str(u).strip()]
+        if isinstance(raw_urls, list)
+        else []
+    )
+    merged_urls = list(dict.fromkeys([*source_urls, *extracted_urls]))
 
     # Deduplicate numbers by (value, unit, context)
     seen_nums = set()
@@ -201,7 +226,7 @@ Extract the fact sheet now."""
         claims=claims,
         numbers=unique_numbers[:30],
         entities=unique_entities[:20],
-        source_urls=source_urls[:15],
+        source_urls=merged_urls[:15],
         raw_snippets=snippets,
     )
 
@@ -224,7 +249,7 @@ async def run_research(
     settings = get_autoblog_settings()
 
     # Step 1: Recent posts for context
-    recent_posts = await asyncio.to_thread(fetch_recent_posts, settings.recent_posts_limit)
+    recent_posts = await fetch_recent_posts(settings.recent_posts_limit)
 
     # Step 2: Plan queries
     queries = await plan_research_queries(topic, angle, article_type, recent_posts)
