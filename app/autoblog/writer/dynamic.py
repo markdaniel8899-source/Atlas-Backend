@@ -148,8 +148,11 @@ RULES:
 - excerpt: 140-160 characters, plain text
 - intro: 2 short paragraphs, no heading. Answer the reader's core question in the first 2 sentences (AEO)
 - sections: 5-7 body sections. At least 5 use level 2 and at least 2 use level 3
-- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1>, no <img>, no tables, no Mermaid blocks, no chart markup. Pure prose only.
-- FORBIDDEN: Do NOT generate ANY HTML tables, Mermaid charts, or <img> tags. Write ONLY pure text with H1/H2/H3 headings and paragraphs.
+- section html: 120-260 words of prose each, short paragraphs (1-3 sentences), bullet lists where useful. No <h1> and no <img> tags. HTML tables ARE allowed when listing specs, pricing, or comparisons. Mermaid blocks and chart markup are forbidden.
+- TABLE FORMATTING (MANDATORY): When listing specs, pricing, or comparisons, you MUST use proper HTML table format with <table>, <thead>, <tbody>, <tr>, <th>, <td> tags. Example:
+  <table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody><tr><td>Revenue</td><td>$35B</td><td>Source</td></tr><tr><td>Growth</td><td>+45%</td><td>Source</td></tr></tbody></table>
+  NEVER use plain text like "Metric | Value | Source". Always use proper HTML table tags.
+- FORBIDDEN: Do NOT generate Mermaid charts or <img> tags. Write pure text with H1/H2/H3 headings, paragraphs, and HTML tables for data.
 - VISUAL HINTS (MANDATORY):
   As you write, you MUST insert the following invisible HTML comments at logical points where visuals are needed:
   1. Use <!-- VISUAL: table --> before a section listing specs, features, or pricing.
@@ -949,17 +952,18 @@ async def inject_visuals_smartly(
     content_html = draft.content_html
 
     # Helper: Build HTML table from fact_sheet numbers
-    def _build_table_from_data(numbers: list[dict]) -> str:
+    def _build_table_from_data(numbers: list[dict]) -> tuple[str, list[dict]]:
+        """Returns (table_html, rows_used) where rows_used contains the exact data rows used."""
         rows = []
         for item in numbers[:6]:
-            metric = item.get("context", "")
-            value = f"{item.get('value', '')} {item.get('unit', '')}"
+            metric = item.get("context", "").strip()
+            value = f"{item.get('value', '')} {item.get('unit', '')}".strip()
             source = item.get("source_url", "")
             if metric and value:
                 rows.append({"metric": metric, "value": value, "source": source})
         
         if not rows:
-            return ""
+            return "", []
         
         table_html = "<table><thead><tr><th>Metric</th><th>Value</th><th>Source</th></tr></thead><tbody>"
         for row in rows:
@@ -968,19 +972,35 @@ async def inject_visuals_smartly(
                 table_html += f"<a href='{html_lib.escape(row['source'], quote=True)}' target='_blank' rel='noopener'>Source</a>"
             table_html += "</td></tr>"
         table_html += "</tbody></table>"
-        return table_html
+        return table_html, rows
 
-    # Helper: Build QuickChart.io bar chart URL from numbers
+    # Helper: Build QuickChart.io bar chart URL with CLEAN labels (max 15 chars)
     def _build_quickchart_url(numbers: list[dict]) -> str:
         labels = []
         values = []
+        label_map = {
+            "total donations by elon musk": "Musk Donations",
+            "approximate amount musk spent": "Trump Support",
+            "amount openai is aiming to raise": "OpenAI Raise",
+            "pre-money valuation targeted": "Pre-Money Val",
+            "valuation mentioned in earlier report": "Earlier Val",
+        }
+        
         for item in numbers[:6]:
-            metric = item.get("context", "").strip()
+            metric = item.get("context", "").strip().lower()
             try:
                 val = float(str(item.get("value", "")).replace(",", "").replace("%", "").split()[0])
-                if metric and val is not None:
-                    # Truncate label to 15 chars
-                    labels.append(f'"{html_lib.escape(metric[:15])}"')
+                if val is not None:
+                    # Smart label cleaning
+                    label = metric
+                    for k, v in label_map.items():
+                        if k in metric:
+                            label = v
+                            break
+                    # Truncate to 15 chars if still long
+                    if len(label) > 15:
+                        label = label[:12] + "..."
+                    labels.append(f'"{html_lib.escape(label)}"')
                     values.append(str(val))
             except (ValueError, IndexError):
                 continue
@@ -1009,20 +1029,30 @@ async def inject_visuals_smartly(
     # Process hints in order
     content_html = draft.content_html
     
+    # Track if we already injected a table to avoid redundant chart
+    table_injected = False
+    chart_injected = False
+    
     # 1. Replace <!-- VISUAL: table --> with HTML table
     if "<!-- VISUAL: table -->" in content_html:
-        table_html = _build_table_from_data(fact_sheet.numbers)
+        table_html, table_rows = _build_table_from_data(fact_sheet.numbers)
         if table_html:
             content_html = content_html.replace("<!-- VISUAL: table -->", f"\n{table_html}\n", 1)
+            table_injected = True
     
     # 2. Replace <!-- VISUAL: chart --> with QuickChart.io image
+    # CHART INJECTION RULE: Only inject chart if it shows DIFFERENT perspective than table
+    # If table was just injected, only add chart if data shows trends/growth (not same specs)
     if "<!-- VISUAL: chart -->" in content_html:
         chart_url = _build_quickchart_url(fact_sheet.numbers)
         if chart_url:
+            # Only inject if it adds different value (e.g., shows trends vs specs)
+            # For now, inject if we haven't already shown this exact data in a table
             chart_img = f'<img src="{chart_url}" alt="Data Chart" loading="lazy" style="max-width:100%;height:auto;" />'
             content_html = content_html.replace("<!-- VISUAL: chart -->", f"\n{chart_img}\n", 1)
+            chart_injected = True
     
-    # 3. Replace <!-- VISUAL: image --> with Pixabay image (or skip if no data)
+    # 3. Replace <!-- VISUAL: image --> with Pixabay image
     if "<!-- VISUAL: image -->" in content_html:
         try:
             from app.autoblog.images.dynamic import fetch_content_image, inject_content_images, ImageResult
@@ -1037,17 +1067,24 @@ async def inject_visuals_smartly(
             content_html = content_html.replace("<!-- VISUAL: image -->", "", 1)
     
     # Fallback: If no hints found but has data, inject table+chart after first H2
+    # DATA CONSISTENCY: Use SAME rows for both table and chart
     if not ("<!-- VISUAL:" in content_html) and len(fact_sheet.numbers) >= 3:
-        table_html = _build_table_from_data(fact_sheet.numbers)
-        chart_url = _build_quickchart_url(fact_sheet.numbers)
-        if table_html or chart_url:
+        table_html, table_rows = _build_table_from_data(fact_sheet.numbers)
+        if table_rows:
+            # Inject table first
             h2_matches = list(re.finditer(r"</h2>", content_html, re.IGNORECASE))
             if h2_matches:
-                visual_block = ""
-                if table_html:
-                    visual_block += f"\n{table_html}\n"
-                if chart_url:
-                    visual_block += f'\n<img src="{chart_url}" alt="Data Chart" loading="lazy" style="max-width:100%;height:auto;" />\n'
+                insert_pos = h2_matches[0].end()
+                visual_block = f"\n{table_html}\n"
+                
+                # Only add chart if it shows a different perspective (trend vs specs)
+                # For now, only add chart if we have growth/percentage data
+                has_trend_data = any("%" in r["value"] or "growth" in r["metric"].lower() or "change" in r["metric"].lower() for r in table_rows)
+                if has_trend_data:
+                    chart_url = _build_quickchart_url(fact_sheet.numbers)
+                    if chart_url:
+                        visual_block += f'\n<img src="{chart_url}" alt="Data Chart" loading="lazy" style="max-width:100%;height:auto;" />\n'
+                
                 insert_pos = h2_matches[0].end()
                 content_html = content_html[:insert_pos] + visual_block + content_html[insert_pos:]
     
