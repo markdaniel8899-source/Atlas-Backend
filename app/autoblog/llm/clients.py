@@ -281,13 +281,14 @@ async def nemotron_chat(
 # ─── Gemini (Fallback + Meta/FAQ Final Pass) ─────────────────────────────────
 
 
-def _gemini_model(system_instruction: str) -> genai.GenerativeModel:
+def _gemini_model(system_instruction: str, model_name: str | None = None) -> genai.GenerativeModel:
     settings = get_autoblog_settings()
     if not settings.google_api_key:
         raise BlogPipelineError("GOOGLE_API_KEY is not configured.", status_code=503)
     genai.configure(api_key=settings.google_api_key)
+    model = model_name or settings.gemini_model
     return genai.GenerativeModel(
-        model_name=settings.gemini_model,
+        model_name=model,
         system_instruction=system_instruction,
     )
 
@@ -342,8 +343,8 @@ async def gemini_chat(
     temperature: float = 0.4,
     max_tokens: int = 4096,
 ) -> ModelCallResult:
-    """Async Gemini call (final fallback)."""
-    model = _gemini_model(system)
+    """Async Gemini call (final fallback). Uses gemini-1.5-flash-latest explicitly."""
+    model = _gemini_model(system, model_name="gemini-1.5-flash-latest")
     return await _generate_gemini(model, prompt, temperature=temperature, max_tokens=max_tokens)
 
 
