@@ -343,15 +343,9 @@ async def gemini_chat(
     temperature: float = 0.4,
     max_tokens: int = 4096,
 ) -> ModelCallResult:
-    """Async Gemini call (final fallback). Uses gemini-2.5-flash with fallback to 2.0-flash."""
-    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
-        try:
-            model = _gemini_model(system, model_name=model_name)
-            return await _generate_gemini(model, prompt, temperature=temperature, max_tokens=max_tokens)
-        except Exception as exc:
-            logger.warning(f"Gemini model {model_name} failed: {exc}, trying next fallback...")
-            continue
-    raise BlogPipelineError("All Gemini fallback models failed")
+    """Async Gemini call (final fallback). Uses gemini-3.8-flash as recommended by API."""
+    model = _gemini_model(system, model_name="gemini-3.8-flash")
+    return await _generate_gemini(model, prompt, temperature=temperature, max_tokens=max_tokens)
 
 
 # ─── High-level Helpers ──────────────────────────────────────────────────────
