@@ -42,8 +42,6 @@ from app.autoblog.visuals.images import fetch_unique_cover_image
 from app.autoblog.seo.schema import build_all_meta
 from app.autoblog.observability import PipelineRunLogger, tracked_llm_call
 
-from __future__ import annotations
-
 import asyncio
 import sys
 import threading

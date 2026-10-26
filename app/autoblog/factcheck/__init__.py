@@ -12,7 +12,6 @@ from app.autoblog.llm.clients import (
     groq_research_with_nemotron_fallback,
 )
 from app.autoblog.research import FactSheet
-from app.autoblog.writer.dynamic import _NUMBER_RE
 from app.autoblog.sources import AI_MODEL_RE
 
 
