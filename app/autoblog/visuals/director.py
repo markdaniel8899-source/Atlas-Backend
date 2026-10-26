@@ -13,7 +13,8 @@ from app.autoblog.llm.clients import (
     gemini_chat,
     nemotron_with_gemini_fallback,
 )
-from app.autoblog.models import FactSheet, KeywordPlan, TopicTrend
+from app.autoblog.models import KeywordPlan
+from app.autoblog.research import FactSheet
 from app.autoblog.visuals.labels import clean_label
 from pydantic import BaseModel, Field
 
