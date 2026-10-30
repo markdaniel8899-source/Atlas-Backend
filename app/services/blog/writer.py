@@ -115,6 +115,13 @@ def parse_writer_output(raw: str) -> WriterOutput:
     if text.startswith("```"):
         text = re.sub(r"^```(?:html|text)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
+    # Auto-fix missing scope attribute on <th> tags
+    text = re.sub(
+        r"<th(?![^>]*\bscope=)(?![^>]*\s/\s*>)(>|[^>]*>)",
+        r'<th scope="col"',
+        text,
+        flags=re.IGNORECASE,
+    )
     title = _extract_tag(text, "TITLE")
     slug = _extract_tag(text, "SLUG")
     excerpt = _extract_tag(text, "EXCERPT")

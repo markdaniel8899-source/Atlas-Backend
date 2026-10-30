@@ -140,6 +140,7 @@ HTML rules:
 - Do not include images or visual placeholders. A separate visual stage handles them.
 - Do not include an FAQ section. A separate FAQ stage adds it.
 - Include a final <h2>Sources</h2> section when practical.
+- MANDATORY: All <th> (table header) tags MUST include a scope attribute. Use <th scope="col"> for column headers or <th scope="row"> for row headers. Example: <th scope="col">Metric</th>.
 
 Research rules:
 - Cite at least 3 unique sources from the supplied research only.
