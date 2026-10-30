@@ -1,0 +1,439 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-28",
+  "description": "Curated evergreen topic bank for the ATLAS auto-blog pipeline. Eight seeds per category keep the first runs diverse while trend and LLM candidates can be added at runtime.",
+  "topics": [
+    {
+      "id": "ai-note-taking-retrieval-practice",
+      "topic": "How AI note-taking improves retrieval practice",
+      "category": "ai",
+      "primary_keyword": "AI note-taking",
+      "secondary_keywords": ["retrieval practice", "AI study notes", "active recall"],
+      "angle": "Connect AI-generated notes to evidence-based recall instead of passive review.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-spaced-repetition-study-plan",
+      "topic": "Building a spaced repetition plan with AI",
+      "category": "ai",
+      "primary_keyword": "AI spaced repetition",
+      "secondary_keywords": ["spaced repetition schedule", "AI flashcards", "study planning"],
+      "angle": "Use AI to schedule reviews without overloading the week.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-active-recall-vs-rereading",
+      "topic": "Active recall vs rereading: what AI can measure",
+      "category": "ai",
+      "primary_keyword": "active recall vs rereading",
+      "secondary_keywords": ["active recall", "rereading", "study methods"],
+      "angle": "Compare the methods and show how AI can generate recall prompts.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-flashcard-quality",
+      "topic": "How to make better AI flashcards",
+      "category": "ai",
+      "primary_keyword": "AI flashcards",
+      "secondary_keywords": ["flashcard quality", "atomic notes", "spaced repetition"],
+      "angle": "Move from copy-paste cards to atomic, testable prompts.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-study-planner",
+      "topic": "Can an AI study planner reduce decision fatigue?",
+      "category": "ai",
+      "primary_keyword": "AI study planner",
+      "secondary_keywords": ["study schedule", "decision fatigue", "learning plan"],
+      "angle": "Explain the tradeoffs and a practical weekly planning workflow.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-tutor-prompts",
+      "topic": "Prompting an AI tutor for clearer explanations",
+      "category": "ai",
+      "primary_keyword": "AI tutor prompts",
+      "secondary_keywords": ["AI tutor", "concept explanation", "learning prompts"],
+      "angle": "Show prompt patterns that ask for examples, checks, and simpler language.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-study-notes-accuracy",
+      "topic": "How to spot unreliable claims in AI study notes",
+      "category": "ai",
+      "primary_keyword": "AI study notes",
+      "secondary_keywords": ["AI hallucinations", "source checking", "study accuracy"],
+      "angle": "A practical verification checklist for students.",
+      "audience": "students"
+    },
+    {
+      "id": "ai-tutoring-vs-search",
+      "topic": "AI tutoring vs search engines for homework help",
+      "category": "ai",
+      "primary_keyword": "AI tutoring",
+      "secondary_keywords": ["homework help", "search engines", "learning support"],
+      "angle": "Explain when search is enough and when a tutor-style interaction helps.",
+      "audience": "students"
+    },
+    {
+      "id": "digital-note-organization",
+      "topic": "A practical system for organizing digital notes",
+      "category": "software",
+      "primary_keyword": "digital note organization",
+      "secondary_keywords": ["note organization", "study notes", "knowledge management"],
+      "angle": "Compare folder, tag, and linking systems without overcomplicating them.",
+      "audience": "students"
+    },
+    {
+      "id": "markdown-for-students",
+      "topic": "Why students should learn Markdown",
+      "category": "software",
+      "primary_keyword": "Markdown for students",
+      "secondary_keywords": ["Markdown notes", "study workflow", "plain text"],
+      "angle": "Focus on portable notes, quick formatting, and long-term access.",
+      "audience": "students"
+    },
+    {
+      "id": "study-dashboard",
+      "topic": "Designing a simple study dashboard",
+      "category": "software",
+      "primary_keyword": "study dashboard",
+      "secondary_keywords": ["study workflow", "progress tracking", "learning dashboard"],
+      "angle": "Explain what to track, what to ignore, and how to review it weekly.",
+      "audience": "students"
+    },
+    {
+      "id": "coursework-task-management",
+      "topic": "Managing coursework without a complex task app",
+      "category": "software",
+      "primary_keyword": "coursework task management",
+      "secondary_keywords": ["student task management", "deadlines", "study planning"],
+      "angle": "A lightweight weekly review system for assignments and exams.",
+      "audience": "students"
+    },
+    {
+      "id": "browser-tab-management",
+      "topic": "Fixing browser tab overload during research",
+      "category": "software",
+      "primary_keyword": "browser tab management",
+      "secondary_keywords": ["research workflow", "tab overload", "focus"],
+      "angle": "Group, park, and close tabs intentionally while keeping sources recoverable.",
+      "audience": "students"
+    },
+    {
+      "id": "cloud-backup-for-students",
+      "topic": "Cloud sync is not a backup: a student guide",
+      "category": "software",
+      "primary_keyword": "cloud backup for students",
+      "secondary_keywords": ["cloud sync", "file backup", "data loss"],
+      "angle": "Explain sync versus backup with a simple 3-2-1 routine.",
+      "audience": "students"
+    },
+    {
+      "id": "note-taking-shortcuts",
+      "topic": "Keyboard shortcuts that speed up note-taking",
+      "category": "software",
+      "primary_keyword": "note-taking shortcuts",
+      "secondary_keywords": ["keyboard workflow", "productivity", "study tools"],
+      "angle": "Teach a small set of high-leverage shortcuts instead of a giant list.",
+      "audience": "students"
+    },
+    {
+      "id": "choosing-note-taking-app",
+      "topic": "How to choose a note-taking app without switching forever",
+      "category": "software",
+      "primary_keyword": "note-taking app comparison",
+      "secondary_keywords": ["note-taking apps", "app comparison", "study workflow"],
+      "angle": "Provide decision criteria and a 30-day trial framework.",
+      "audience": "students"
+    },
+    {
+      "id": "laptop-specs-for-students",
+      "topic": "Laptop specs that matter for students",
+      "category": "hardware",
+      "primary_keyword": "laptop specs for students",
+      "secondary_keywords": ["student laptop", "RAM", "battery life"],
+      "angle": "Prioritize battery, memory, and display quality over marketing claims.",
+      "audience": "students"
+    },
+    {
+      "id": "tablet-vs-laptop",
+      "topic": "Tablet vs laptop for note-taking",
+      "category": "hardware",
+      "primary_keyword": "tablet vs laptop",
+      "secondary_keywords": ["note-taking devices", "student hardware", "digital notes"],
+      "angle": "Choose by writing style, required software, and portability.",
+      "audience": "students"
+    },
+    {
+      "id": "e-ink-tablet",
+      "topic": "Are e-ink tablets worth it for reading and notes?",
+      "category": "hardware",
+      "primary_keyword": "e-ink tablet",
+      "secondary_keywords": ["e-ink notes", "digital reading", "eye strain"],
+      "angle": "Explain the tradeoffs for heavy readers and frequent annotators.",
+      "audience": "students"
+    },
+    {
+      "id": "budget-monitor-for-studying",
+      "topic": "Choosing a budget monitor for studying",
+      "category": "hardware",
+      "primary_keyword": "budget monitor for studying",
+      "secondary_keywords": ["study monitor", "display size", "eye comfort"],
+      "angle": "Cover resolution, size, ergonomics, and cable requirements.",
+      "audience": "students"
+    },
+    {
+      "id": "mechanical-keyboard-writing",
+      "topic": "Do mechanical keyboards help writing?",
+      "category": "hardware",
+      "primary_keyword": "mechanical keyboard for writing",
+      "secondary_keywords": ["typing comfort", "keyboard switches", "writer tools"],
+      "angle": "Discuss comfort, noise, and cost without treating gear as a shortcut.",
+      "audience": "students"
+    },
+    {
+      "id": "webcam-for-online-classes",
+      "topic": "Webcam basics for online classes",
+      "category": "hardware",
+      "primary_keyword": "webcam for online classes",
+      "secondary_keywords": ["online class setup", "video calls", "lighting"],
+      "angle": "Explain why lighting and framing matter more than resolution.",
+      "audience": "students"
+    },
+    {
+      "id": "noise-cancelling-headphones",
+      "topic": "Noise-cancelling headphones for studying",
+      "category": "hardware",
+      "primary_keyword": "noise-cancelling headphones",
+      "secondary_keywords": ["study focus", "headphones", "noise control"],
+      "angle": "Compare active noise cancellation, comfort, and situational limits.",
+      "audience": "students"
+    },
+    {
+      "id": "external-ssd-for-students",
+      "topic": "External SSDs for student backups",
+      "category": "hardware",
+      "primary_keyword": "external SSD for students",
+      "secondary_keywords": ["backup drive", "storage", "data safety"],
+      "angle": "Cover capacity, speed, durability, and a simple backup routine.",
+      "audience": "students"
+    },
+    {
+      "id": "weekly-study-review",
+      "topic": "Automating a weekly study review",
+      "category": "automation",
+      "primary_keyword": "weekly study review",
+      "secondary_keywords": ["study automation", "weekly review", "learning routine"],
+      "angle": "Build a repeatable checklist with calendar reminders and a short reset.",
+      "audience": "students"
+    },
+    {
+      "id": "calendar-blocking",
+      "topic": "Calendar blocking for coursework",
+      "category": "automation",
+      "primary_keyword": "calendar blocking",
+      "secondary_keywords": ["time blocking", "study schedule", "deadlines"],
+      "angle": "Protect deep work without overplanning every minute.",
+      "audience": "students"
+    },
+    {
+      "id": "student-email-filters",
+      "topic": "Email filters every student should use",
+      "category": "automation",
+      "primary_keyword": "student email filters",
+      "secondary_keywords": ["email automation", "inbox management", "school email"],
+      "angle": "Sort deadlines, receipts, and course mail before the inbox becomes a task list.",
+      "audience": "students"
+    },
+    {
+      "id": "rss-for-research",
+      "topic": "Using RSS to follow research without social media",
+      "category": "automation",
+      "primary_keyword": "RSS for research",
+      "secondary_keywords": ["research workflow", "RSS feeds", "information diet"],
+      "angle": "Build a focused feed and review it on a schedule.",
+      "audience": "students"
+    },
+    {
+      "id": "automated-backup-routine",
+      "topic": "A simple automated backup routine",
+      "category": "automation",
+      "primary_keyword": "automated backup routine",
+      "secondary_keywords": ["backup automation", "data safety", "cloud storage"],
+      "angle": "Schedule backups, verify them, and test a restore.",
+      "audience": "students"
+    },
+    {
+      "id": "no-code-study-automation",
+      "topic": "No-code automation for student workflows",
+      "category": "automation",
+      "primary_keyword": "no-code study automation",
+      "secondary_keywords": ["study workflow", "automation tools", "productivity"],
+      "angle": "Start with one trigger and one action instead of building a fragile system.",
+      "audience": "students"
+    },
+    {
+      "id": "text-expansion",
+      "topic": "Text expansion for repetitive writing",
+      "category": "automation",
+      "primary_keyword": "text expansion",
+      "secondary_keywords": ["writing shortcuts", "email templates", "productivity"],
+      "angle": "Use snippets for citations, emails, and recurring notes.",
+      "audience": "students"
+    },
+    {
+      "id": "smart-study-reminders",
+      "topic": "Smart reminders that support learning",
+      "category": "automation",
+      "primary_keyword": "smart study reminders",
+      "secondary_keywords": ["reminder systems", "spaced review", "study habits"],
+      "angle": "Explain reminder timing and how to avoid notification fatigue.",
+      "audience": "students"
+    },
+    {
+      "id": "student-budget",
+      "topic": "A realistic student budget framework",
+      "category": "finance",
+      "primary_keyword": "student budget",
+      "secondary_keywords": ["budgeting", "college expenses", "money management"],
+      "angle": "Separate fixed, flexible, and irregular costs with a monthly review.",
+      "audience": "students"
+    },
+    {
+      "id": "student-emergency-fund",
+      "topic": "Why students need an emergency fund",
+      "category": "finance",
+      "primary_keyword": "student emergency fund",
+      "secondary_keywords": ["emergency savings", "budgeting", "financial resilience"],
+      "angle": "Explain small targets, automatic transfers, and realistic tradeoffs.",
+      "audience": "students"
+    },
+    {
+      "id": "subscription-audit",
+      "topic": "How to audit recurring subscriptions",
+      "category": "finance",
+      "primary_keyword": "subscription audit",
+      "secondary_keywords": ["recurring expenses", "budgeting", "student discounts"],
+      "angle": "Find, evaluate, and cancel subscriptions without losing essential tools.",
+      "audience": "students"
+    },
+    {
+      "id": "student-discounts",
+      "topic": "Finding legitimate student discounts",
+      "category": "finance",
+      "primary_keyword": "student discounts",
+      "secondary_keywords": ["student savings", "software discounts", "budgeting"],
+      "angle": "Verify eligibility and avoid fake or expiring offers.",
+      "audience": "students"
+    },
+    {
+      "id": "credit-score-basics",
+      "topic": "Credit scores explained for students",
+      "category": "finance",
+      "primary_keyword": "credit score basics",
+      "secondary_keywords": ["credit report", "student finance", "borrowing"],
+      "angle": "Give an educational explanation with no personalized advice.",
+      "audience": "students"
+    },
+    {
+      "id": "index-fund-basics",
+      "topic": "Index funds: a plain-language primer",
+      "category": "finance",
+      "primary_keyword": "index fund basics",
+      "secondary_keywords": ["investing basics", "diversification", "long-term investing"],
+      "angle": "Explain risk, fees, and diversification with a clear disclaimer.",
+      "audience": "students"
+    },
+    {
+      "id": "student-financial-aid",
+      "topic": "Understanding student financial aid offers",
+      "category": "finance",
+      "primary_keyword": "student financial aid",
+      "secondary_keywords": ["financial aid offer", "college costs", "scholarships"],
+      "angle": "Compare aid packages using total cost and renewal conditions.",
+      "audience": "students"
+    },
+    {
+      "id": "student-part-time-taxes",
+      "topic": "Part-time income and taxes for students",
+      "category": "finance",
+      "primary_keyword": "student part-time taxes",
+      "secondary_keywords": ["tax basics", "part-time work", "income"],
+      "angle": "Provide an educational overview using authoritative tax sources.",
+      "audience": "students"
+    },
+    {
+      "id": "sleep-and-learning",
+      "topic": "How sleep affects learning and memory",
+      "category": "other",
+      "primary_keyword": "sleep and learning",
+      "secondary_keywords": ["memory consolidation", "sleep quality", "study habits"],
+      "angle": "Focus on evidence-based habits and avoid miracle claims.",
+      "audience": "students"
+    },
+    {
+      "id": "exercise-and-focus",
+      "topic": "Exercise breaks that improve focus",
+      "category": "other",
+      "primary_keyword": "exercise and focus",
+      "secondary_keywords": ["study breaks", "physical activity", "attention"],
+      "angle": "Show how short movement breaks fit into a study session.",
+      "audience": "students"
+    },
+    {
+      "id": "study-environment",
+      "topic": "Designing a study environment that reduces friction",
+      "category": "other",
+      "primary_keyword": "study environment",
+      "secondary_keywords": ["focus space", "distraction control", "study habits"],
+      "angle": "Cover light, noise, access, and the cost of frequent context switching.",
+      "audience": "students"
+    },
+    {
+      "id": "handwriting-vs-typing-notes",
+      "topic": "Handwriting vs typing notes: what research suggests",
+      "category": "other",
+      "primary_keyword": "handwriting vs typing notes",
+      "secondary_keywords": ["note-taking methods", "memory", "study notes"],
+      "angle": "Explain that context matters and avoid overclaiming from single studies.",
+      "audience": "students"
+    },
+    {
+      "id": "exam-preparation-plan",
+      "topic": "Building an exam prep plan that adapts",
+      "category": "other",
+      "primary_keyword": "exam preparation plan",
+      "secondary_keywords": ["exam study schedule", "practice tests", "revision"],
+      "angle": "Use backward planning, practice retrieval, and weekly adjustments.",
+      "audience": "students"
+    },
+    {
+      "id": "group-study",
+      "topic": "Making group study sessions productive",
+      "category": "other",
+      "primary_keyword": "group study",
+      "secondary_keywords": ["study groups", "collaboration", "active learning"],
+      "angle": "Assign roles, set an agenda, and protect individual recall time.",
+      "audience": "students"
+    },
+    {
+      "id": "study-burnout",
+      "topic": "Recognizing and recovering from study burnout",
+      "category": "other",
+      "primary_keyword": "study burnout",
+      "secondary_keywords": ["burnout recovery", "student wellbeing", "study habits"],
+      "angle": "Describe early signals and sustainable workload changes.",
+      "audience": "students"
+    },
+    {
+      "id": "reading-comprehension",
+      "topic": "Improving reading comprehension for dense material",
+      "category": "other",
+      "primary_keyword": "reading comprehension",
+      "secondary_keywords": ["active reading", "technical reading", "study skills"],
+      "angle": "Use preview, question, summarize, and review as a repeatable loop.",
+      "audience": "students"
+    }
+  ]
+}

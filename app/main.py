@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import secrets
 import sys
 import traceback
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import ai_service
 from app.config import get_settings
-from app.deps import fetch_profile_role, verify_bearer_token
-from app.routers import blog, chat, gamification, quizzes, roadmaps
+from app.routers import blog, blog_admin, chat, gamification, quizzes, roadmaps
+from app.scheduler import start_scheduler, stop_scheduler
 
 # Background-task logs go to stdout (the nohup log). A non-tty stdout is
 # block-buffered, so those prints never appeared next to uvicorn's 202 line.
@@ -32,36 +30,6 @@ REQUIRED_ORIGINS = [
     "http://127.0.0.1:5173",
     "https://atlas-frontend-pearl.vercel.app",
 ]
-
-
-async def require_blog_admin(
-    authorization: str | None = Header(default=None),
-    x_admin_secret: str | None = Header(default=None),
-) -> None:
-    """Gate privileged endpoints: 403 unless the caller is an admin.
-
-    Two accepted proofs:
-      * X-Admin-Secret header matching the server's ADMIN_SECRET
-        (for cron jobs / scripts), compared in constant time; or
-      * a valid Supabase session JWT whose profile row has role = 'admin'.
-
-    Every failure - missing header, bad secret, invalid token, non-admin
-    user, unverifiable role - returns 403 Forbidden.
-    """
-    settings = get_settings()
-    provided = (x_admin_secret or "").strip()
-    expected = settings.admin_secret
-    if expected and provided and secrets.compare_digest(provided, expected):
-        return
-
-    try:
-        user_id = verify_bearer_token(authorization)
-    except HTTPException:
-        raise HTTPException(status_code=403, detail="Admin access required.")
-
-    role = await asyncio.to_thread(fetch_profile_role, user_id)
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required.")
 
 
 class ErrorCatchMiddleware:
@@ -118,7 +86,12 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
+        scheduler = start_scheduler()
+        app.state.blog_scheduler = scheduler
+        try:
+            yield
+        finally:
+            stop_scheduler(scheduler)
 
     app = FastAPI(
         title="ATLAS AI Service",
@@ -142,6 +115,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(blog.router)
+    app.include_router(blog_admin.router)
     app.include_router(chat.router)
     app.include_router(quizzes.router)
     app.include_router(roadmaps.router)
@@ -162,6 +136,11 @@ def create_app() -> FastAPI:
             "status": "ok",
             "ai_configured": settings.ai_ready,
             "blog_configured": settings.blog_ready,
+            "blog_pipeline_configured": settings.blog_pipeline_ready,
+            "blog_writer_configured": settings.blog_writer_ready,
+            "r2_configured": settings.r2_ready,
+            "deploy_hook_configured": settings.deploy_ready,
+            "blog_cron_enabled": settings.blog_cron_enabled,
             "routes": {
                 task.value: ai_service.pick_model(task)
                 for task in ai_service.Task

@@ -9,6 +9,7 @@ Auth with the service-role client, and any failure is a clean 401.
 from __future__ import annotations
 
 import asyncio
+import secrets
 
 from fastapi import Header, HTTPException
 from supabase import Client, create_client
@@ -68,6 +69,42 @@ async def get_current_user(
     thread so the sync supabase-py call never blocks the event loop.
     """
     return await asyncio.to_thread(verify_bearer_token, authorization)
+
+
+def _admin_secret_matches(provided: str, expected: str) -> bool:
+    if not provided or not expected:
+        return False
+    return secrets.compare_digest(provided, expected)
+
+
+async def require_blog_admin(
+    authorization: str | None = Header(default=None),
+    x_admin_secret: str | None = Header(default=None),
+) -> None:
+    """Gate privileged blog endpoints.
+
+    Two accepted proofs:
+      * ``X-Admin-Secret`` matching ``ADMIN_SECRET`` (cron/scripts), and
+      * a valid Supabase session JWT whose profile role is ``admin``.
+
+    Every missing, malformed, or non-admin credential is a clean 403.
+    """
+    settings = get_settings()
+    if _admin_secret_matches(
+        (x_admin_secret or "").strip(), settings.admin_secret
+    ):
+        return
+
+    try:
+        user_id = verify_bearer_token(authorization)
+    except HTTPException:
+        raise HTTPException(
+            status_code=403, detail="Admin access required."
+        ) from None
+
+    role = await asyncio.to_thread(fetch_profile_role, user_id)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
 
 
 def fetch_profile_role(user_id: str) -> str | None:
