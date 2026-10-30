@@ -122,6 +122,35 @@ def parse_writer_output(raw: str) -> WriterOutput:
         text,
         flags=re.IGNORECASE,
     )
+    # Auto-fix common table structure issues
+    # Fix: <th><tr> -> <tr><th>
+    text = re.sub(r"<th>\s*<tr\b", r"<tr><th", text, flags=re.IGNORECASE)
+    # Fix: </tr></th> -> </th></tr>
+    text = re.sub(r"</tr>\s*</th>", r"</th></tr>", text, flags=re.IGNORECASE)
+    # Fix: missing thead/tbody - wrap bare tr/th in thead, then tbody for remaining
+    # This is a best-effort fix; proper structure should come from LLM
+    # Ensure table has thead if it has th
+    def _ensure_thead(match):
+        table_content = match.group(1)
+        if "<thead" not in table_content and "<th" in table_content:
+            # Wrap first row of th in thead
+            table_content = re.sub(
+                r"(<tr\b[^>]*>.*?<th\b[^>]*>.*?</th>.*?</tr>)",
+                r"<thead>\1</thead>",
+                table_content,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        if "<tbody" not in table_content and "<tr" in table_content:
+            table_content = re.sub(
+                r"(<tr\b[^>]*>.*?</tr>)(?=\s*(?:<tr|</table))",
+                r"<tbody>\1</tbody>",
+                table_content,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        return f"<table>{table_content}</table>"
+    
+    text = re.sub(r"<table>(.*?)</table>", _ensure_thead, text, flags=re.IGNORECASE | re.DOTALL)
     title = _extract_tag(text, "TITLE")
     slug = _extract_tag(text, "SLUG")
     excerpt = _extract_tag(text, "EXCERPT")

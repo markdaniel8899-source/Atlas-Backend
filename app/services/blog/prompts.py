@@ -141,6 +141,18 @@ HTML rules:
 - Do not include an FAQ section. A separate FAQ stage adds it.
 - Include a final <h2>Sources</h2> section when practical.
 - MANDATORY: All <th> (table header) tags MUST include a scope attribute. Use <th scope="col"> for column headers or <th scope="row"> for row headers. Example: <th scope="col">Metric</th>.
+- TABLE STRUCTURE RULES (MANDATORY):
+  - Tables MUST be wrapped in <div class="table-wrap"><table>...</table></div>
+  - Tables MUST have <thead> and <tbody> sections
+  - Column headers go in <thead><tr><th scope="col">Header</th>...</tr></thead>
+  - Data rows go in <tbody><tr><td>...</td>...</tr></tbody>
+  - Never put <tr> inside <th> or <th> inside <tr> inside <th>
+  - Never nest tables
+  - Example valid table:
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+      <tbody><tr><td>Speed</td><td>Fast</td></tr></tbody>
+    </table></div>
 
 Research rules:
 - Cite at least 3 unique sources from the supplied research only.
