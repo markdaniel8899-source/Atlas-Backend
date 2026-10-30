@@ -253,6 +253,6 @@ def get_settings() -> Settings:
             "BLOG_DAILY_ARTICLE_LIMIT", 1, 1, 10
         ),
         blog_cron_enabled=_flag("BLOG_CRON_ENABLED", True),
-        blog_cron_hour_utc=_int("BLOG_CRON_HOUR_UTC", 6, 0, 23),
+        blog_cron_hour_utc=_int("BLOG_CRON_HOUR_UTC", 9, 0, 23),
         blog_cron_minute_utc=_int("BLOG_CRON_MINUTE_UTC", 0, 0, 59),
     )

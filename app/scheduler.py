@@ -22,6 +22,7 @@ JOB_ID = "atlas-daily-blog"
 
 async def run_daily_blog() -> None:
     """Generate at most the configured number of articles per UTC day."""
+    logger.info("Daily Auto-Blog Cron Job triggered at 09:00 UTC")
     settings = get_settings()
     if not settings.blog_pipeline_ready:
         logger.warning("Scheduled blog run skipped: pipeline is not configured.")
