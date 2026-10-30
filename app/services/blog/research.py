@@ -225,9 +225,11 @@ class ResearchService:
             raise ResearchError(
                 f"Only {len(sources)} usable sources found; need at least 3."
             )
-        if not any(source.tier <= SourceTier.TIER_2 for source in sources):
-            raise ResearchError(
-                "Research needs at least one authoritative tier 1/2 source."
+        has_authoritative = any(source.tier <= SourceTier.TIER_2 for source in sources)
+        if not has_authoritative:
+            logger.warning(
+                "Research proceeding with Tier 3 sources only (no Tier 1/2 sources found). "
+                "Article may need manual review for source quality."
             )
 
         facts: list[NumericFact] = []
