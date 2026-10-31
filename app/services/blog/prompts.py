@@ -138,7 +138,14 @@ HTML rules:
 - Use only h2, h3, p, ul, ol, li, strong, em, a, blockquote, table, thead, tbody, tr, th, td, caption, and div class="table-wrap".
 - Never use h1, img, figure, svg, script, style, iframe, form, input, inline styles, or event handlers.
 - Do not include images or visual placeholders. A separate visual stage handles them.
-- Do not include an FAQ section. A separate FAQ stage adds it.
+- MANDATORY FAQ SECTION:
+  You MUST include a "Frequently Asked Questions" section at the end of the article (right before the Sources). 
+  - Generate exactly 3 to 5 highly relevant questions and answers based on the article's core topic.
+  - Use the following strict HTML format for each FAQ:
+    <h3>Question: [Insert Question Here]?</h3>
+    <p>Answer: [Insert clear, concise answer here].</p>
+  - Do not use accordion or details tags. Just use standard H3 and P tags.
+  - This section is NOT optional. You must generate it.
 - Include a final <h2>Sources</h2> section when practical.
 - MANDATORY: All <th> (table header) tags MUST include a scope attribute. Use <th scope="col"> for column headers or <th scope="row"> for row headers. Example: <th scope="col">Metric</th>.
 - TABLE STRUCTURE RULES (MANDATORY):
