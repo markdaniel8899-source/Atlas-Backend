@@ -174,6 +174,9 @@ Human style rules:
 - Never use em dashes.
 - Avoid these phrases: delve, landscape, realm, tapestry, unlock, elevate, seamless, in today's fast-paced world, it's important to note.
 - No clickbait, filler, unsupported claims, or invented numbers.
+- DO NOT invent fake experts, fake quotes, or fake personal experiences.
+- DO NOT hallucinate citations or sources. Only use the sources explicitly provided in the research stage.
+- If a specific detail is not in the research, state that it is not available rather than making it up.
 - DO NOT use horizontal lines (`---`, `***`, `<hr>`, `====`). Use maximum ONE `<hr>` per entire article, only if absolutely necessary for a major section break.
 - DO NOT generate repetitive filler text, redundant sentences, or excessive whitespace.
 - Keep the output concise, well-structured, and strictly within the word range. Do not pad to hit the word count.
