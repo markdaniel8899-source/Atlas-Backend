@@ -117,8 +117,8 @@ def parse_writer_output(raw: str) -> WriterOutput:
         text = re.sub(r"\s*```$", "", text)
     # Auto-fix missing scope attribute on <th> tags
     text = re.sub(
-        r"<th(?![^>]*\bscope=)(?![^>]*\s/\s*>)(>|[^>]*>)",
-        r'<th scope="col"',
+        r"<th\b(?![^>]*\bscope\s*=)([^>]*)>",
+        r'<th scope="col"\1>',
         text,
         flags=re.IGNORECASE,
     )
@@ -132,22 +132,37 @@ def parse_writer_output(raw: str) -> WriterOutput:
     # Ensure table has thead if it has th
     def _ensure_thead(match):
         table_content = match.group(1)
+        row_pattern = re.compile(
+            r"<tr\b[^>]*>(?:(?!</tr>).)*</tr>",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if "<thead" not in table_content and "<th" in table_content:
-            # Wrap first row of th in thead
-            table_content = re.sub(
-                r"(<tr\b[^>]*>.*?<th\b[^>]*>.*?</th>.*?</tr>)",
-                r"<thead>\1</thead>",
-                table_content,
-                count=1,
-                flags=re.IGNORECASE | re.DOTALL,
+            for row in row_pattern.finditer(table_content):
+                if re.search(r"<th\b", row.group(0), flags=re.IGNORECASE):
+                    table_content = (
+                        table_content[: row.start()]
+                        + "<thead>"
+                        + row.group(0)
+                        + "</thead>"
+                        + table_content[row.end() :]
+                    )
+                    break
+        if "<tbody" not in table_content:
+            thead_end = table_content.lower().find("</thead>")
+            offset = (
+                thead_end + len("</thead>") if thead_end != -1 else 0
             )
-        if "<tbody" not in table_content and "<tr" in table_content:
-            table_content = re.sub(
-                r"(<tr\b[^>]*>.*?</tr>)(?=\s*(?:<tr|</table))",
-                r"<tbody>\1</tbody>",
-                table_content,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
+            rows = list(row_pattern.finditer(table_content[offset:]))
+            if rows:
+                start = offset + rows[0].start()
+                end = offset + rows[-1].end()
+                table_content = (
+                    table_content[:start]
+                    + "<tbody>"
+                    + table_content[start:end]
+                    + "</tbody>"
+                    + table_content[end:]
+                )
         return f"<table>{table_content}</table>"
     
     text = re.sub(r"<table>(.*?)</table>", _ensure_thead, text, flags=re.IGNORECASE | re.DOTALL)
