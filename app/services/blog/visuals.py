@@ -367,11 +367,16 @@ class VisualService:
             )
             if asset is not None:
                 data = await self.pixabay.download(asset.url)
-                stored = self.storage.upload_cover(
-                    data,
-                    slug,
+                url = self.storage.compress_and_upload(
+                    data, slug, prefix="covers"
+                )
+                stored = StoredImage(
+                    url=url,
+                    width=1200,
+                    height=630,
                     provider="pixabay",
                     external_id=asset.external_id,
+                    kind="cover",
                 )
                 self.registry.add(
                     "pixabay",
@@ -382,8 +387,14 @@ class VisualService:
         except Exception:
             pass
         data = generate_branded_cover(title, category.value)
-        stored = self.storage.upload_cover(
-            data, slug, provider="branded", external_id=None
+        url = self.storage.compress_and_upload(data, slug, prefix="covers")
+        stored = StoredImage(
+            url=url,
+            width=1200,
+            height=630,
+            provider="branded",
+            external_id=None,
+            kind="cover",
         )
         self.registry.add("branded", url=stored.url)
         return stored
@@ -402,11 +413,16 @@ class VisualService:
             )
             if asset is not None:
                 data = await self.pixabay.download(asset.url)
-                stored = self.storage.upload_content(
-                    data,
-                    slug,
+                url = self.storage.compress_and_upload(
+                    data, slug, prefix="content"
+                )
+                stored = StoredImage(
+                    url=url,
+                    width=1200,
+                    height=630,
                     provider="pixabay",
                     external_id=asset.external_id,
+                    kind="content",
                 )
                 self.registry.add(
                     "pixabay",
@@ -420,8 +436,14 @@ class VisualService:
             item.data.title if item.data and item.data.title else title,
             category.value,
         )
-        stored = self.storage.upload_content(
-            data, slug, provider="branded", external_id=None
+        url = self.storage.compress_and_upload(data, slug, prefix="content")
+        stored = StoredImage(
+            url=url,
+            width=1200,
+            height=630,
+            provider="branded",
+            external_id=None,
+            kind="content",
         )
         self.registry.add("branded", url=stored.url)
         return stored
