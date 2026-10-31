@@ -218,17 +218,24 @@ class BlogRepository:
 
     async def active_run(self) -> dict[str, Any] | None:
         def run() -> dict[str, Any] | None:
-            result = (
-                _get_client()
-                .table("blog_pipeline_runs")
-                .select("*")
-                .eq("status", "running")
-                .order("started_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            rows = _rows(result)
-            return rows[0] if rows else None
+            try:
+                result = (
+                    _get_client()
+                    .table("blog_pipeline_runs")
+                    .select("id, trigger, status, current_stage, topic_id, post_id, started_at, finished_at, score, word_count, error, provider_summary, created_at")
+                    .eq("status", "running")
+                    .order("started_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                rows = _rows(result)
+                return rows[0] if rows else None
+            except httpx.RemoteProtocolError as exc:
+                logger.warning(
+                    "Supabase connection terminated fetching active pipeline run (likely large payload): %s",
+                    exc,
+                )
+                return None
 
         return await asyncio.to_thread(run)
 
