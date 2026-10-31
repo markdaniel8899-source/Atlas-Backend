@@ -692,3 +692,17 @@ class BlogRepository:
             return unpublished
 
         return await asyncio.to_thread(run)
+
+    async def delete_run(self, run_id: str) -> bool:
+        def run() -> bool:
+            result = (
+                _get_client()
+                .table("blog_pipeline_runs")
+                .delete()
+                .eq("id", run_id)
+                .execute()
+            )
+            rows = _rows(result)
+            return bool(rows)
+
+        return await asyncio.to_thread(run)

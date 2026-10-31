@@ -113,6 +113,18 @@ async def pipeline_run_detail(run_id: str) -> dict[str, Any]:
     }
 
 
+@router.delete("/pipeline/runs/{run_id}")
+async def delete_pipeline_run(run_id: str) -> dict[str, Any]:
+    repo = _repo()
+    try:
+        deleted = await repo.delete_run(run_id)
+    except BlogStorageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Pipeline run not found.")
+    return {"deleted": True, "run_id": run_id}
+
+
 @router.get("/admin/posts/{post_id}/preview")
 async def preview_post(post_id: str) -> dict[str, Any]:
     try:
