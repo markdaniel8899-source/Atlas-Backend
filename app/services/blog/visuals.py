@@ -485,7 +485,7 @@ def validate_visual_plan(
         raise VisualPlanError(
             f"Expected {required_count} content visuals, got {len(plan.visuals)}."
         )
-    _validate_photo_query(plan.cover.query)
+    plan.cover.query = _validate_photo_query(plan.cover.query)
     if not plan.cover.alt.strip() or not plan.cover.caption.strip():
         raise VisualPlanError("Cover needs alt text and a caption.")
 
@@ -526,7 +526,7 @@ def validate_visual_plan(
                 f"Invalid after_paragraph for {item.after_heading}."
             )
         if item.type is VisualType.PHOTO:
-            _validate_photo_query(item.query or "")
+            item.query = _validate_photo_query(item.query or "")
             key = normalize_heading(item.after_heading)
             photo_counts[key] = photo_counts.get(key, 0) + 1
         elif item.type is VisualType.CHART:
@@ -646,13 +646,18 @@ def _photo_figure(image: StoredImage, alt: str, caption: str) -> str:
     )
 
 
-def _validate_photo_query(query: str) -> None:
-    words = (query or "").strip().split()
-    if not PHOTO_QUERY_WORDS[0] <= len(words) <= PHOTO_QUERY_WORDS[1]:
-        raise VisualPlanError("Photo query must be 2-5 words.")
-    lowered = {word.lower().strip(".,") for word in words}
-    if lowered & PIXABAY_BRANDS:
-        raise VisualPlanError("Photo query must not contain brands.")
+def _validate_photo_query(query: str) -> str:
+    """Return a safe photo query (2-5 words, no brands). Never raises."""
+    words: list[str] = []
+    for token in (query or "").split():
+        word = token.strip(".,!?\"'")
+        if word and word.lower() not in PIXABAY_BRANDS:
+            words.append(word)
+    if len(words) > PHOTO_QUERY_WORDS[1]:
+        words = words[:3]
+    if len(words) < PHOTO_QUERY_WORDS[0]:
+        return "study desk"
+    return " ".join(words)
 
 
 def _validate_chart_data(

@@ -360,6 +360,9 @@ Rules:
 - Chart data: 2-8 labels and values, source_url from supplied research.
 - Table data: provide labels/values or headers/rows and a source_url.
 - Photos need a 2-5 word query with no brands or people.
+- MANDATORY: Image search queries MUST be strictly between 2 to 5 words.
+  - BAD: 'tech' (1 word), 'a beautiful modern laptop on a wooden desk in a sunny office' (10 words).
+  - GOOD: 'modern laptop desk', 'coding screen dark', 'student studying library'.
 """
 
 
