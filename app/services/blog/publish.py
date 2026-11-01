@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
+import httpcore
 import httpx
 
 from supabase import Client, create_client
@@ -302,15 +303,23 @@ class BlogRepository:
 
     async def get_steps(self, run_id: str) -> list[dict[str, Any]]:
         def run() -> list[dict[str, Any]]:
-            result = (
-                _get_client()
-                .table("blog_pipeline_steps")
-                .select("*")
-                .eq("run_id", run_id)
-                .order("created_at")
-                .execute()
-            )
-            return _rows(result)
+            try:
+                result = (
+                    _get_client()
+                    .table("blog_pipeline_steps")
+                    .select("id, run_id, stage, status, attempt, provider, model, duration_ms, error, created_at")
+                    .eq("run_id", run_id)
+                    .order("created_at")
+                    .execute()
+                )
+                return _rows(result)
+            except (httpx.RemoteProtocolError, httpcore.RemoteProtocolError) as exc:
+                logger.warning(
+                    "Supabase connection terminated in get_steps, likely due to large payload. Returning safe fallback. run_id=%s error=%s",
+                    run_id,
+                    exc,
+                )
+                return []
 
         return await asyncio.to_thread(run)
 
