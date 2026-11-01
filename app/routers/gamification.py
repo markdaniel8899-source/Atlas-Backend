@@ -17,9 +17,10 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from supabase import Client, create_client
+from supabase import Client
 
 from app.config import get_settings
+from app.supabase_client import create_supabase_client
 
 router = APIRouter(prefix="/api", tags=["gamification"])
 
@@ -36,7 +37,7 @@ def _service_client() -> Client:
                 "and SUPABASE_SERVICE_ROLE_KEY on the server."
             ),
         )
-    return create_client(
+    return create_supabase_client(
         settings.supabase_url, settings.supabase_service_role_key
     )
 

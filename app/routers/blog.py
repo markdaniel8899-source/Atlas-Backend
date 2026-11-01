@@ -17,10 +17,11 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from supabase import Client, create_client
+from supabase import Client
 
 from app.cache import ttl_lru_cache
 from app.config import get_settings
+from app.supabase_client import create_supabase_client
 
 router = APIRouter(prefix="/api/blog", tags=["blog"])
 
@@ -50,7 +51,7 @@ def _get_client() -> Client:
         )
     global _client
     if _client is None:
-        _client = create_client(settings.supabase_url, key)
+        _client = create_supabase_client(settings.supabase_url, key)
     return _client
 
 

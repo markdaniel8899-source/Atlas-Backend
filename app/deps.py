@@ -12,9 +12,10 @@ import asyncio
 import secrets
 
 from fastapi import Header, HTTPException
-from supabase import Client, create_client
+from supabase import Client
 
 from app.config import get_settings
+from app.supabase_client import create_supabase_client
 
 
 def _service_client() -> Client:
@@ -27,7 +28,7 @@ def _service_client() -> Client:
                 "SUPABASE_SERVICE_ROLE_KEY on the server."
             ),
         )
-    return create_client(
+    return create_supabase_client(
         settings.supabase_url, settings.supabase_service_role_key
     )
 

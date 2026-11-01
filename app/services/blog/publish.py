@@ -3,16 +3,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
+import time
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import httpcore
 import httpx
 
-from supabase import Client, create_client
+from supabase import Client
 
 from app.cache import clear_all
 from app.config import get_settings
+from app.supabase_client import create_supabase_client
 
 from .types import (
     KeywordPlan,
@@ -46,10 +50,66 @@ def _get_client() -> Client:
             "SUPABASE_SERVICE_ROLE_KEY."
         )
     if _client is None:
-        _client = create_client(
+        _client = create_supabase_client(
             settings.supabase_url, settings.supabase_service_role_key
         )
     return _client
+
+
+_DRAFT_SAVE_RETRIES = 3
+_DRAFT_SAVE_BACKOFF_SECONDS = (2, 4, 8)
+_PRESERVED_BLOCK_RE = re.compile(
+    r"<(pre|code)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_INTER_TAG_WS_RE = re.compile(r">\s+<")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _execute_with_retry(
+    operation: Callable[[], Any], *, label: str
+) -> Any:
+    for attempt in range(_DRAFT_SAVE_RETRIES + 1):
+        try:
+            return operation()
+        except (httpx.RemoteProtocolError, httpcore.RemoteProtocolError) as exc:
+            if attempt >= _DRAFT_SAVE_RETRIES:
+                logger.error(
+                    "Failed to %s after %d retries: %s",
+                    label,
+                    _DRAFT_SAVE_RETRIES,
+                    exc,
+                )
+                raise
+            wait_time = _DRAFT_SAVE_BACKOFF_SECONDS[attempt]
+            logger.warning(
+                "Connection dropped while trying to %s. Retrying in %ss... "
+                "(Retry %d/%d)",
+                label,
+                wait_time,
+                attempt + 1,
+                _DRAFT_SAVE_RETRIES,
+            )
+            time.sleep(wait_time)
+    raise AssertionError("retry loop exhausted without raising")
+
+
+def _minify_html(html: str) -> str:
+    if not html:
+        return html
+    preserved: list[str] = []
+
+    def stash(match: re.Match[str]) -> str:
+        preserved.append(match.group(0))
+        return f"\x00atlas-preserved-{len(preserved) - 1}\x00"
+
+    text = _PRESERVED_BLOCK_RE.sub(stash, html)
+    text = _HTML_COMMENT_RE.sub(" ", text)
+    text = _INTER_TAG_WS_RE.sub("><", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    for index, block in enumerate(preserved):
+        text = text.replace(f"\x00atlas-preserved-{index}\x00", block)
+    return text
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
@@ -427,9 +487,10 @@ class BlogRepository:
             )
         )
         payload = {
+            "id": str(uuid.uuid4()),
             "title": output.title,
             "slug": output.slug,
-            "content": output.content,
+            "content": _minify_html(output.content),
             "excerpt": output.excerpt,
             "tags": tags,
             "keywords": flat_keywords,
@@ -441,11 +502,14 @@ class BlogRepository:
         }
 
         def run() -> str:
-            result = (
-                _get_client()
-                .table("blog_posts")
-                .insert(payload)
-                .execute()
+            result = _execute_with_retry(
+                lambda: (
+                    _get_client()
+                    .table("blog_posts")
+                    .upsert(payload)
+                    .execute()
+                ),
+                label=f"insert blog draft for run {run_id}",
             )
             post_id = _first_id(result)
             if not post_id:
@@ -457,11 +521,22 @@ class BlogRepository:
     async def update_post(self, post_id: str, **fields: Any) -> None:
         if not fields:
             return
+        payload = dict(fields)
+        content = payload.get("content")
+        if isinstance(content, str):
+            payload["content"] = _minify_html(content)
 
         def run() -> None:
-            _get_client().table("blog_posts").update(fields).eq(
-                "id", post_id
-            ).execute()
+            _execute_with_retry(
+                lambda: (
+                    _get_client()
+                    .table("blog_posts")
+                    .update(payload)
+                    .eq("id", post_id)
+                    .execute()
+                ),
+                label=f"update blog post {post_id}",
+            )
 
         await asyncio.to_thread(run)
 
