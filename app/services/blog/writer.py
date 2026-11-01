@@ -58,6 +58,8 @@ WRITER_TAGS = {
     "td",
     "caption",
     "div",
+    "pre",
+    "code",
 }
 
 VISUAL_TAGS = WRITER_TAGS | {
@@ -417,7 +419,7 @@ def _allowed_attrs(tag: str) -> set[str]:
         return {"href", "rel", "target", "title"}
     if tag == "img":
         return {"src", "alt", "width", "height", "loading"}
-    if tag == "div":
+    if tag in ("div", "pre", "code"):
         return {"class"}
     if tag == "th":
         return {"scope"}

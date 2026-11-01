@@ -135,7 +135,7 @@ Return exactly this delimited format, with no markdown fences and no extra text:
 </CONTENT>
 
 HTML rules:
-- Use only h2, h3, p, ul, ol, li, strong, em, a, blockquote, table, thead, tbody, tr, th, td, caption, and div class="table-wrap".
+- Use only h2, h3, p, ul, ol, li, strong, em, a, blockquote, table, thead, tbody, tr, th, td, caption, pre, code, and div class="table-wrap".
 - Never use h1, img, figure, svg, script, style, iframe, form, input, inline styles, or event handlers.
 - Do not include images or visual placeholders. A separate visual stage handles them.
 - MANDATORY FAQ SECTION:
