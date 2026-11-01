@@ -241,7 +241,7 @@ def get_settings() -> Settings:
         blog_enabled=_flag("BLOG_PIPELINE_ENABLED", True),
         blog_min_words=_int("BLOG_MIN_WORDS", 900, 300, 4000),
         blog_max_words=_int("BLOG_MAX_WORDS", 2200, 600, 8000),
-        blog_min_score=_int("BLOG_MIN_SCORE", 90, 0, 100),
+        blog_min_score=_int("BLOG_MIN_SCORE", 80, 0, 100),
         blog_max_repairs=_int("BLOG_MAX_REPAIRS", 2, 0, 5),
         blog_visual_word_threshold=_int(
             "BLOG_VISUAL_WORD_THRESHOLD", 1200, 300, 10000

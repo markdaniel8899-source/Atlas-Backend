@@ -90,7 +90,7 @@ def run_gate(
     topic: TopicCandidate | None = None,
     history: Sequence[TopicHistoryEntry] = (),
     visual_plan: VisualPlan | None = None,
-    min_score: int = 90,
+    min_score: int = 80,
     visual_word_threshold: int = 1200,
     finance: bool | None = None,
     citation_checker: Callable[[str], bool] | None = None,

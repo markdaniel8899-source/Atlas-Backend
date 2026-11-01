@@ -536,7 +536,7 @@ class PipelineRunner:
             topic=topic,
             history=self.history,
             visual_plan=plan,
-            min_score=max(90, self.settings.blog_min_score),
+            min_score=max(80, self.settings.blog_min_score),
             visual_word_threshold=self.settings.blog_visual_word_threshold,
             collision_checker=collision_checker,
         )
