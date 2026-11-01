@@ -161,6 +161,20 @@ HTML rules:
       <tbody><tr><td>Speed</td><td>Fast</td></tr></tbody>
     </table></div>
 
+MANDATORY SEO AND CITATION RULES (NON-NEGOTIABLE, CHECKED BY AN AUTOMATED GATE):
+- H06 MANDATORY KEYWORD PLACEMENT: You MUST include the exact phrase "{primary_keyword}" in:
+  - The main title inside the <TITLE> tag (this is the article title; never add an <h1>, which is forbidden).
+  - The very first paragraph, within the first 100 words of the article body.
+  - At least TWO (2) <h2> subheadings.
+  Use the exact phrase character for character, with no synonyms, stemming, or word-order changes. Do not skip this. It is a strict requirement.
+- H07 MANDATORY KEYWORD DENSITY: For an article of ~1200 words, you MUST use the exact phrase "{primary_keyword}" naturally between 8 to 15 times throughout the body text to achieve a 0.5% - 2.5% density. Do not stuff it unnaturally, but ensure it appears frequently enough to pass the density checker. For longer drafts, keep at least one exact-phrase use per 150 words. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
+- H11 MANDATORY INLINE CITATIONS: Whenever you state a statistic, percentage, year, or numeric claim (e.g., "80 percent", "2026", "40 to 60 percent"), you MUST append an inline citation immediately after it, inside the SAME <p>, <li>, or <blockquote> element.
+  - Format: a real HTML hyperlink with a bracket label, like <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> or <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[Source 1]</a>.
+  - Example: <p>Studies show a 60% improvement <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> in productivity.</p>
+  - Replace EXACT_RESEARCH_URL with a URL copied verbatim from the supplied research sources. Never output the literal text EXACT_RESEARCH_URL.
+  - A plain "[1]" or "[Source 1]" that is not a hyperlink does NOT count. Any paragraph containing a number must also contain at least one real citation link.
+  - Ensure these numbers match the sources provided in the research stage. Never invent a URL, statistic, or number. If a number has no source in the research, remove it instead of stating it uncited.
+
 Research rules:
 - Cite at least 3 unique sources from the supplied research only.
 - Use this link shape: <a href="URL" rel="noopener noreferrer" target="_blank">Publisher</a>.
@@ -189,6 +203,10 @@ Human style rules:
 - Keep the output concise, well-structured, and strictly within the word range. Do not pad to hit the word count.
 - Finance content must be educational, mention risk, and never give personalized advice or guarantee returns.
 """
+
+
+def _writer_system(keywords: KeywordPlan) -> str:
+    return WRITER_SYSTEM.replace("{primary_keyword}", keywords.primary)
 
 
 def _writer_user(
@@ -253,7 +271,7 @@ def writer_messages(
     internal_links: Sequence[tuple[str, str]] = (),
 ) -> list[dict[str, str]]:
     return [
-        {"role": "system", "content": WRITER_SYSTEM},
+        {"role": "system", "content": _writer_system(keywords)},
         {
             "role": "user",
             "content": _writer_user(
@@ -295,6 +313,7 @@ Failed checks:
 
 Repair rules:
 {chr(10).join(preserve)}
+- The MANDATORY SEO AND CITATION RULES in the system prompt always apply. Before returning, re-verify H06 keyword placement, H07 keyword density, and H11 inline citations; fixing these failures overrides brevity.
 
 Current draft:
 <TITLE>{draft.title}</TITLE>
@@ -305,7 +324,7 @@ Current draft:
 </CONTENT>
 """
     return [
-        {"role": "system", "content": WRITER_SYSTEM},
+        {"role": "system", "content": _writer_system(keywords)},
         {
             "role": "user",
             "content": _writer_user(
