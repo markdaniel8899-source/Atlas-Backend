@@ -149,8 +149,8 @@ def run_gate(
     check(
         "H01",
         "structure",
-        900 <= words <= 2200,
-        f"Word count is {words}; required 900-2,200.",
+        800 <= words <= 2200,
+        f"Word count is {words}; required 800-2,200 words (minimum 800 words is hard).",
     )
     clickbait = CLICKBAIT_RE.search(output.title)
     check(

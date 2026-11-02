@@ -206,7 +206,7 @@ Human style rules:
 - If a specific detail is not in the research, state that it is not available rather than making it up.
 - DO NOT use horizontal lines (`---`, `***`, `<hr>`, `====`). Use maximum ONE `<hr>` per entire article, only if absolutely necessary for a major section break.
 - DO NOT generate repetitive filler text, redundant sentences, or excessive whitespace.
-- Keep the output concise, well-structured, and strictly within the word range. Do not pad to hit the word count.
+- Keep the output concise, well-structured, and within the word range. Minimum 800 words is HARD — do not go below 800 words. Do not pad with filler just to hit the count; add real value instead.
 - Finance content must be educational, mention risk, and never give personalized advice or guarantee returns.
 - KEYWORD USAGE: Use the exact phrase "{primary_keyword}" in the title and first 100 words, and at least one H2. For other H2s and body text, prefer synonyms and related LSI terms to avoid keyword stuffing. Do not repeat the exact phrase unnaturally.
 """
@@ -250,7 +250,7 @@ Category: {topic.category.value}
 Angle: {topic.angle or "Use the strongest practical angle for students."}
 Audience: {topic.audience if hasattr(topic, "audience") else "students"}
 Finance: {finance_rules}
-Word range: {min_words}-{max_words} words.
+Word range: {min_words}-{max_words} words. HARD MINIMUM: 800 words — the article must be at least 800 words long.
 ATLAS internal links (use 1-3 where relevant):
 {chr(10).join(link_lines) or "- https://atlas.app/app/notes"}
 
