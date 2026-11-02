@@ -187,8 +187,8 @@ def run_gate(
     check(
         "H05",
         "structure",
-        4 <= len(h2s) <= 8 and not empty_sections and not skipped_h3,
-        "Need 4-8 H2s, non-empty sections, and no skipped heading levels.",
+        len(h2s) >= 1 and not empty_sections and not skipped_h3,
+        "Need at least one H2, non-empty sections, and no skipped heading levels.",
     )
     title_has = _contains(output.title, keywords.primary)
     intro_has = _contains(first_words(editorial, 100), keywords.primary)
@@ -198,14 +198,14 @@ def run_gate(
     check(
         "H06",
         "seo",
-        title_has and intro_has and h2_hits >= 2,
-        "Primary keyword needs title, first 100 words, and 2 H2s.",
+        title_has and intro_has and h2_hits >= 1,
+        "Primary keyword needs title, first 100 words, and at least one H2 (synonyms allowed in other H2s).",
     )
     check(
         "H07",
         "seo",
-        0.5 <= density <= 2.5,
-        f"Keyword density is {density:.2f}%; required 0.5-2.5%.",
+        0.3 <= density <= 3.0,
+        f"Keyword density is {density:.2f}%; required 0.3-3.0% (use synonyms to avoid stuffing).",
     )
     secondary_hits = sum(
         1 for keyword in keywords.secondary if _contains(text, keyword)
@@ -220,8 +220,8 @@ def run_gate(
     check(
         "H08",
         "seo",
-        secondary_ratio >= 0.6 and long_tail_hits >= 2 and lsi_hits >= 5,
-        "Secondary coverage, long-tail count, or LSI coverage is too low.",
+        secondary_ratio >= 0.4 and long_tail_hits >= 1 and lsi_hits >= 3,
+        "Secondary coverage, long-tail count, or LSI coverage is too low (synonyms count toward LSI).",
     )
 
     minimum_citations = math.ceil(words / 600)

@@ -165,9 +165,9 @@ MANDATORY SEO AND CITATION RULES (NON-NEGOTIABLE, CHECKED BY AN AUTOMATED GATE):
 - H06 MANDATORY KEYWORD PLACEMENT: You MUST include the exact phrase "{primary_keyword}" in:
   - The main title inside the <TITLE> tag (this is the article title; never add an <h1>, which is forbidden).
   - The very first paragraph, within the first 100 words of the article body.
-  - At least TWO (2) <h2> subheadings.
-  Use the exact phrase character for character, with no synonyms, stemming, or word-order changes. Do not skip this. It is a strict requirement.
-- H07 MANDATORY KEYWORD DENSITY: For an article of ~1200 words, you MUST use the exact phrase "{primary_keyword}" naturally between 8 to 15 times throughout the body text to achieve a 0.5% - 2.5% density. Do not stuff it unnaturally, but ensure it appears frequently enough to pass the density checker. For longer drafts, keep at least one exact-phrase use per 150 words. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
+  - At least ONE (1) <h2> subheading.
+  Use the exact phrase character for character in these three places. In all other H2s and body text, prefer synonyms and related LSI terms to avoid keyword stuffing.
+- H07 MANDATORY KEYWORD DENSITY: For an article of ~1200 words, use the exact phrase "{primary_keyword}" naturally between 4 to 10 times throughout the body text to achieve a 0.3% - 3.0% density. Do not stuff it unnaturally; use synonyms for additional mentions. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
 - H11 MANDATORY INLINE CITATIONS: Whenever you state a statistic, percentage, year, or numeric claim (e.g., "80 percent", "2026", "40 to 60 percent"), you MUST append an inline citation immediately after it, inside the SAME <p>, <li>, or <blockquote> element.
   - Format: a real HTML hyperlink with a bracket label, like <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> or <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[Source 1]</a>.
   - Example: <p>Studies show a 60% improvement <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> in productivity.</p>
@@ -184,9 +184,9 @@ Research rules:
 SEO and answer-engine rules:
 - Put the primary keyword in the title, first 100 words, and at least 2 H2 headings.
 - Open with a direct, useful answer of 40-70 words inside the first 150 words.
-- Use 4-8 H2 sections with scannable paragraphs, lists, or a table.
+- Use multiple H2 sections with scannable paragraphs, lists, or a table (no strict minimum or maximum; one H2 minimum).
 - Use question-style H2s where they read naturally.
-- Add 1-3 contextual internal links from the supplied ATLAS links.
+- Add up to 3 contextual internal links from the supplied ATLAS links (max 3; do not exceed).
 - End with a practical takeaway and a short ATLAS CTA.
 
 Human style rules:
@@ -202,6 +202,7 @@ Human style rules:
 - DO NOT generate repetitive filler text, redundant sentences, or excessive whitespace.
 - Keep the output concise, well-structured, and strictly within the word range. Do not pad to hit the word count.
 - Finance content must be educational, mention risk, and never give personalized advice or guarantee returns.
+- KEYWORD USAGE: Use the exact phrase "{primary_keyword}" in the title and first 100 words, and at least one H2. For other H2s and body text, prefer synonyms and related LSI terms to avoid keyword stuffing. Do not repeat the exact phrase unnaturally.
 """
 
 
