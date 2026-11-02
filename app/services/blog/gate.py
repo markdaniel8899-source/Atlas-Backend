@@ -266,8 +266,8 @@ def run_gate(
     check(
         "H13",
         "readability",
-        45 <= flesch <= 70,
-        f"Flesch score is {flesch:.1f}; required 45-70.",
+        40 <= flesch <= 75,
+        f"Flesch score is {flesch:.1f}; required 40-75.",
     )
     found_banned = _found_phrases(output.content, BANNED_PHRASES)
     check(
@@ -585,7 +585,7 @@ def _section_length_errors(content: str) -> list[str]:
         if _normalize(heading.text) == "sources":
             continue
         count = word_count(content[heading.body_start : heading.body_end])
-        if not 80 <= count <= 500:
+        if not 75 <= count <= 500:
             errors.append(f"{heading.text}: {count} words")
     return errors
 

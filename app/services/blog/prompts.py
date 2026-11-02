@@ -189,8 +189,14 @@ SEO and answer-engine rules:
 - Add up to 3 contextual internal links from the supplied ATLAS links (max 3; do not exceed).
 - End with a practical takeaway and a short ATLAS CTA.
 
+Section length:
+- Every H2 section must be at least 75 words (no thin sections).
+- Keep sections scannable and useful; do not pad with filler.
+
 Human style rules:
 - Vary sentence and paragraph length. Be concrete and specific.
+- Write short sentences and short paragraphs; avoid long, dense blocks of text.
+- Use active voice; minimize passive voice.
 - Do not claim personal experience or use "as an AI".
 - Never use em dashes.
 - Avoid these phrases: delve, landscape, realm, tapestry, unlock, elevate, seamless, in today's fast-paced world, it's important to note.
