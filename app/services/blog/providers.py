@@ -143,6 +143,7 @@ def provider_targets(
         ]
     elif stage is BlogStage.VISUAL_PLACEMENT:
         targets = [
+            ProviderTarget("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b"),
             ProviderTarget("groq", settings.groq_blog_model),
             ProviderTarget("gemini", settings.gemini_blog_model),
             ProviderTarget("sambanova", settings.sambanova_blog_model),

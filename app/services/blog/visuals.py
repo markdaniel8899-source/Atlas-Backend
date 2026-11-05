@@ -538,8 +538,9 @@ def _expand_visual_coverage(
     if not gaps:
         return plan
     candidate = plan.model_copy(deep=True)
+    max_total_visuals = 4
     for gap_start, gap_end in reversed(gaps):
-        if len(candidate.visuals) - len(plan.visuals) >= 2:
+        if len(candidate.visuals) >= max_total_visuals:
             break
         section = _section_for_gap(headings, content, gap_start, gap_end)
         if section is None:

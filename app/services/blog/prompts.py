@@ -370,18 +370,19 @@ Return strict JSON only:
 }
 
 Rules:
-- Return exactly {visual_count} content visuals plus the cover.
-- Distribute visuals across the whole article, roughly one every 400-500 words. Do not cluster them in the first half.
-- For articles longer than 1000 words, place at least one visual in the final third (the conclusion or the last major section before FAQ/Sources).
+- Return exactly {visual_count} content visuals plus the cover. The cover image is mandatory for every article.
+- Analyze the full article content and decide where visuals add the most value. Distribute them across the whole article, roughly one every 400-500 words. Do not cluster them in the first half.
+- For articles longer than 1000 words, place at least one visual in the final third (the conclusion or the last major section before FAQ/Sources). If the article is text-heavy at the bottom, add an image near the end.
+- Total content visuals must not exceed 4 for large articles (>1200 words).
 - Use a chart only when the research has a clear numeric comparison or trend; otherwise use a table or photo.
 - Use line charts for time-series data (years, months, quarters) and bar charts for direct category comparisons. Never use a bar chart for a time series.
 - Use at most one chart per article. Fill remaining slots with a table and/or photo; for 3 visuals, prefer chart + table + photo.
 - If the article is mostly text with no useful numbers, use photos or a table instead of forcing a chart.
+- Every image must have meaningful alt text for SEO and a caption.
 - Headings must exist exactly and be unique.
 - after_paragraph must fit inside that heading's section.
 - Never place a visual before the first H2, in FAQ, or in Sources.
-- Max 1 photo per H2. Do not place two visuals of the same type next to each other.
-- Every visual needs alt text and a caption.
+- Max 1 photo per H2. Do not place two visuals of the same type next to each other if they are within 150 words of each other.
 - Chart data: 2-8 labels and values, source_url from supplied research.
 - Table data: provide labels/values or headers/rows and a source_url.
 - Photos need a 2-5 word query with no brands or people.
