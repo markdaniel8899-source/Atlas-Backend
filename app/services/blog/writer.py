@@ -60,6 +60,8 @@ WRITER_TAGS = {
     "div",
     "pre",
     "code",
+    "direct_answer",
+    "br",
 }
 
 VISUAL_TAGS = WRITER_TAGS | {
@@ -79,7 +81,7 @@ VISUAL_TAGS = WRITER_TAGS | {
     "circle",
 }
 
-VOID_TAGS = {"img"}
+VOID_TAGS = {"img", "br"}
 GLOBAL_FORBIDDEN_ATTRS = {"style", "id"}
 
 ATLAS_INTERNAL_LINKS: tuple[tuple[str, str], ...] = (
