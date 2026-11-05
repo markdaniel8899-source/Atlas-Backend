@@ -87,6 +87,7 @@ SOFT_CHECK_IDS = {
     "H15",
     "H21",
     "H24",
+    "H25",
 }
 
 
@@ -216,8 +217,14 @@ def run_gate(
     check(
         "H07",
         "seo",
-        0.3 <= density <= 3.0,
-        f"Keyword density is {density:.2f}%; required 0.3-3.0% (use synonyms to avoid stuffing).",
+        density <= 3.0,
+        f"Keyword density is {density:.2f}%; maximum 3.0% to avoid stuffing.",
+    )
+    check(
+        "H25",
+        "seo",
+        density >= 0.3,
+        f"Keyword density is {density:.2f}%; recommended minimum 0.3%.",
     )
     secondary_hits = sum(
         1 for keyword in keywords.secondary if _contains(text, keyword)
@@ -406,7 +413,7 @@ def run_gate(
 
 def _score(checks: Sequence[GateCheck], internal_links: Sequence[str]) -> int:
     groups = {
-        "seo": (25, {"H02", "H03", "H04", "H06", "H07", "H08"}),
+        "seo": (25, {"H02", "H03", "H04", "H06", "H07", "H08", "H25"}),
         "structure": (20, {"H01", "H05", "H12", "H21"}),
         "research": (20, {"H09", "H10", "H11", "H20", "H24"}),
         "readability": (15, {"H13", "H14", "H15"}),
@@ -432,9 +439,9 @@ def _visual_failures(
     if production is None:
         return ["Visual production is missing."]
     errors = []
-    if len(production.visuals) != required_count:
+    if len(production.visuals) < required_count:
         errors.append(
-            f"Expected {required_count} content visuals, got {len(production.visuals)}."
+            f"Expected at least {required_count} content visuals, got {len(production.visuals)}."
         )
     if (production.cover_width, production.cover_height) != (1200, 630):
         errors.append("Cover must be 1200x630.")

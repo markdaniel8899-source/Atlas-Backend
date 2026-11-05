@@ -32,6 +32,7 @@ from app.services.r2_storage import r2_storage
 from app.services.blog.writer import (
     extract_headings,
     normalize_heading,
+    word_count,
 )
 
 PIXABAY_BRANDS = {
@@ -52,6 +53,40 @@ PHOTO_QUERY_WORDS = (2, 5)
 PARAGRAPH_CLOSE_RE = re.compile(r"</p\s*>", re.IGNORECASE)
 IMAGE_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 FORBIDDEN_SECTIONS = {"faq", "sources", "frequently asked questions"}
+MIN_VISUAL_COVERAGE_WORDS = 800
+MAX_TEXT_GAP_WORDS = 450
+SAME_TYPE_MIN_GAP_WORDS = 150
+PHOTO_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "your",
+    "you",
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "from",
+    "into",
+    "that",
+    "this",
+    "are",
+    "can",
+    "does",
+    "using",
+    "use",
+    "best",
+    "top",
+    "guide",
+    "introduction",
+    "conclusion",
+    "final",
+    "thoughts",
+    "summary",
+    "overview",
+}
 
 
 class VisualError(RuntimeError):
@@ -471,7 +506,159 @@ async def plan_visuals(
     validate_visual_plan(
         result.data, content, research, required_count=required_count
     )
-    return result.data
+    plan = _expand_visual_coverage(result.data, content, research)
+    if len(plan.visuals) != required_count:
+        validate_visual_plan(
+            plan, content, research, required_count=len(plan.visuals)
+        )
+    return plan
+
+
+def _expand_visual_coverage(
+    plan: VisualPlan,
+    content: str,
+    research: ResearchBundle,
+) -> VisualPlan:
+    """Add photos where long stretches of the article have no visual."""
+    total_words = word_count(content)
+    if total_words < MIN_VISUAL_COVERAGE_WORDS:
+        return plan
+    headings = [
+        heading
+        for heading in extract_headings(content)
+        if heading.level == 2
+        and normalize_heading(heading.text) not in FORBIDDEN_SECTIONS
+    ]
+    if not headings:
+        return plan
+    points = _visual_word_points(plan, content, headings)
+    points.extend(_table_word_points(content))
+    points.sort()
+    gaps = _visual_gaps(points, total_words)
+    if not gaps:
+        return plan
+    candidate = plan.model_copy(deep=True)
+    for gap_start, gap_end in reversed(gaps):
+        if len(candidate.visuals) - len(plan.visuals) >= 2:
+            break
+        section = _section_for_gap(headings, content, gap_start, gap_end)
+        if section is None:
+            continue
+        key = normalize_heading(section.text)
+        photo_sections = {
+            normalize_heading(item.after_heading)
+            for item in candidate.visuals
+            if item.type is VisualType.PHOTO
+        }
+        if key in photo_sections:
+            continue
+        body = content[section.body_start : section.body_end]
+        if _paragraph_count(body) < 1:
+            continue
+        addition = ContentVisualPlan(
+            after_heading=section.text,
+            after_paragraph=1,
+            type=VisualType.PHOTO,
+            purpose="Support a long text-only stretch of the article.",
+            alt=f"{section.text} for students",
+            caption=f"Reference image for the {section.text.lower()} section.",
+            query=_fallback_photo_query(section.text, body),
+        )
+        trial = candidate.model_copy(deep=True)
+        trial.visuals.append(addition)
+        try:
+            validate_visual_plan(
+                trial,
+                content,
+                research,
+                required_count=len(trial.visuals),
+            )
+        except VisualPlanError:
+            continue
+        candidate = trial
+    return candidate
+
+
+def _visual_word_points(
+    plan: VisualPlan,
+    content: str,
+    headings: Sequence[Any],
+) -> list[int]:
+    by_text = {normalize_heading(heading.text): heading for heading in headings}
+    points: list[int] = []
+    for item in plan.visuals:
+        heading = by_text.get(normalize_heading(item.after_heading))
+        if heading is None:
+            continue
+        try:
+            offset = _insertion_offset(content, heading, item.after_paragraph)
+        except VisualPlanError:
+            continue
+        points.append(word_count(content[:offset]))
+    return sorted(points)
+
+
+def _table_word_points(content: str) -> list[int]:
+    points: list[int] = []
+    for match in re.finditer(r"<table\b", content, re.IGNORECASE):
+        points.append(word_count(content[: match.start()]))
+    return points
+
+
+def _visual_gaps(points: Sequence[int], total_words: int) -> list[tuple[int, int]]:
+    gaps: list[tuple[int, int]] = []
+    cursor = 0
+    for point in points:
+        if point - cursor > MAX_TEXT_GAP_WORDS:
+            gaps.append((cursor, point))
+        cursor = max(cursor, point)
+    if total_words - cursor > MAX_TEXT_GAP_WORDS:
+        gaps.append((cursor, total_words))
+    return gaps
+
+
+def _section_for_gap(
+    headings: Sequence[Any],
+    content: str,
+    gap_start: int,
+    gap_end: int,
+) -> Any | None:
+    starts: list[tuple[int, Any]] = []
+    overlaps: list[tuple[int, Any]] = []
+    for heading in headings:
+        start_words = word_count(content[: heading.body_start])
+        end_words = word_count(content[: heading.body_end])
+        if end_words <= gap_start:
+            continue
+        if start_words >= gap_end:
+            continue
+        overlaps.append((start_words, heading))
+        if start_words >= gap_start:
+            starts.append((start_words, heading))
+    pool = starts or overlaps
+    if not pool:
+        return None
+    return max(pool, key=lambda item: item[0])[1]
+
+
+def _fallback_photo_query(heading_text: str, section_body: str) -> str:
+    haystack = f"{heading_text} {section_body[:1200]}".lower()
+    mapping = (
+        (("code", "coding", "developer", "programming"), "coding screen"),
+        (("laptop", "hardware", "device", "computer"), "laptop desk"),
+        (("study", "studying", "student", "revision"), "student studying"),
+        (("research", "paper", "academic", "thesis"), "books research"),
+        (("finance", "money", "budget", "loan", "salary"), "finance planning"),
+        (("productivity", "planner", "schedule", "time"), "calendar planning"),
+        (("data", "analytic", "metric", "chart", "statistic"), "data dashboard"),
+        (("design", "ui", "ux", "interface"), "design workspace"),
+        (("team", "collaborat", "group"), "team collaboration"),
+        (("ai", "automation", "workflow"), "automation workflow"),
+    )
+    for needles, query in mapping:
+        if any(needle in haystack for needle in needles):
+            return query
+    return "student desk study"
 
 
 def validate_visual_plan(
@@ -546,12 +733,21 @@ def validate_visual_plan(
             raise VisualPlanError(
                 f"Only one photo is allowed per H2: {key}"
             )
-    ordered = [kind for _, kind in sorted(locations)]
-    for previous, current in zip(ordered, ordered[1:]):
-        if previous is current:
+    ordered = sorted(locations)
+    previous_kind: VisualType | None = None
+    previous_words = 0
+    for offset, kind in ordered:
+        current_words = word_count(content[:offset])
+        if (
+            previous_kind is not None
+            and previous_kind is kind
+            and current_words - previous_words < SAME_TYPE_MIN_GAP_WORDS
+        ):
             raise VisualPlanError(
                 "Adjacent visuals cannot have the same type."
             )
+        previous_kind = kind
+        previous_words = current_words
 
 
 def qa_visuals(
@@ -675,8 +871,47 @@ def _validate_chart_data(
     if not 2 <= len(data.labels) <= 8 or len(data.labels) != len(data.values):
         raise VisualPlanError("Chart needs 2-8 matching labels and values.")
     chart_type = (data.chart_type or "bar").strip().lower()
-    data.chart_type = chart_type if chart_type in ("bar", "line") else "bar"
+    if chart_type not in ("bar", "line"):
+        chart_type = "bar"
+    if _is_time_series(data.labels):
+        chart_type = "line"
+    data.chart_type = chart_type
     _validate_source(data.source_url, research_urls)
+
+
+def _is_time_series(labels: Sequence[str]) -> bool:
+    cleaned = [str(label).strip().lower() for label in labels]
+    if not cleaned:
+        return False
+    year_like = sum(
+        1 for label in cleaned if re.fullmatch(r"(19|20)\d{2}", label)
+    )
+    quarter_like = sum(
+        1
+        for label in cleaned
+        if re.fullmatch(r"q[1-4](\s+)?(19|20)?\d{2}", label)
+        or re.fullmatch(r"q[1-4]", label)
+    )
+    month_like = sum(
+        1
+        for label in cleaned
+        if label[:3]
+        in {
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "may",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "oct",
+            "nov",
+            "dec",
+        }
+    )
+    return (year_like + quarter_like + month_like) >= max(2, len(cleaned) - 1)
 
 
 def _validate_table_data(

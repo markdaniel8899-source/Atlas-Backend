@@ -159,7 +159,7 @@ MANDATORY SEO AND CITATION RULES (NON-NEGOTIABLE, CHECKED BY AN AUTOMATED GATE):
   - The very first paragraph, within the first 100 words of the article body.
   - At least ONE (1) <h2> subheading.
   Use the exact phrase character for character in these three places. In all other H2s and body text, prefer synonyms and related LSI terms to avoid keyword stuffing.
-- H07 MANDATORY KEYWORD DENSITY: For an article of ~1200 words, use the exact phrase "{primary_keyword}" naturally between 4 to 10 times throughout the body text to achieve a 0.3% - 3.0% density. Do not stuff it unnaturally; use synonyms for additional mentions. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
+- H07 KEYWORD DENSITY: For an article of ~1200 words, use the exact phrase "{primary_keyword}" naturally 5 to 7 times throughout the body text (minimum 4 exact uses; 0.3% is the floor, 0.4%-0.8% is ideal). Never exceed 3.0% density. Do not rely only on synonyms. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
 - H11 MANDATORY INLINE CITATIONS: Whenever you state a statistic, percentage, year, or numeric claim (e.g., "80 percent", "2026", "40 to 60 percent"), you MUST append an inline citation immediately after it, inside the SAME <p>, <li>, or <blockquote> element.
   - Format: a real HTML hyperlink with a bracket label, like <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> or <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[Source 1]</a>.
   - Example: <p>Studies show a 60% improvement <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> in productivity.</p>
@@ -370,9 +370,12 @@ Return strict JSON only:
 
 Rules:
 - Return exactly {visual_count} content visuals plus the cover.
+- Distribute visuals across the whole article, roughly one every 400-500 words. Do not cluster them in the first half.
+- For articles longer than 1000 words, place at least one visual in the final third (the conclusion or the last major section before FAQ/Sources).
 - Use a chart only when the research has a clear numeric comparison or trend; otherwise use a table or photo.
-- Use line charts for trends over time and bar charts for direct comparisons.
-- Use at most one chart per article. Fill remaining slots with a table or photo.
+- Use line charts for time-series data (years, months, quarters) and bar charts for direct category comparisons. Never use a bar chart for a time series.
+- Use at most one chart per article. Fill remaining slots with a table and/or photo; for 3 visuals, prefer chart + table + photo.
+- If the article is mostly text with no useful numbers, use photos or a table instead of forcing a chart.
 - Headings must exist exactly and be unique.
 - after_paragraph must fit inside that heading's section.
 - Never place a visual before the first H2, in FAQ, or in Sources.
