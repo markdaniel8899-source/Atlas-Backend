@@ -37,7 +37,7 @@ Rules:
 - Optimize for students learning, studying, focus, courses, and career skills.
 - Avoid politics, medical diagnosis, legal advice, gambling, adult content, and conspiracies.
 - Finance must be educational, never personalized advice.
-- Do not invent statistics or claim a trend without a supplied snippet.
+- Do not invent statistics. Use trend_score as an estimate of durable search interest, not as a claim about a specific trend.
 - Scores are 0-100: trend momentum, search opportunity, ATLAS product fit.
 - No duplicate topics or primary keywords.
 """
@@ -138,14 +138,6 @@ HTML rules:
 - Use only h2, h3, p, ul, ol, li, strong, em, a, blockquote, table, thead, tbody, tr, th, td, caption, pre, code, and div class="table-wrap".
 - Never use h1, img, figure, svg, script, style, iframe, form, input, inline styles, or event handlers.
 - Do not include images or visual placeholders. A separate visual stage handles them.
-- MANDATORY FAQ SECTION:
-  You MUST include a "Frequently Asked Questions" section at the end of the article (right before the Sources). 
-  - Generate exactly 3 to 5 highly relevant questions and answers based on the article's core topic.
-  - Use the following strict HTML format for each FAQ:
-    <h3>Question: [Insert Question Here]?</h3>
-    <p>Answer: [Insert clear, concise answer here].</p>
-  - Do not use accordion or details tags. Just use standard H3 and P tags.
-  - This section is NOT optional. You must generate it.
 - Include a final <h2>Sources</h2> section when practical.
 - MANDATORY: All <th> (table header) tags MUST include a scope attribute. Use <th scope="col"> for column headers or <th scope="row"> for row headers. Example: <th scope="col">Metric</th>.
 - TABLE STRUCTURE RULES (MANDATORY):
@@ -182,7 +174,7 @@ Research rules:
 - Never invent a URL, statistic, study, quote, or number.
 
 SEO and answer-engine rules:
-- Put the primary keyword in the title, first 100 words, and at least 2 H2 headings.
+- Put the primary keyword in the title, first 100 words, and at least one H2 heading.
 - Open with a direct, useful answer of 40-70 words inside the first 150 words.
 - Use multiple H2 sections with scannable paragraphs, lists, or a table (no strict minimum or maximum; one H2 minimum).
 - Use question-style H2s where they read naturally.
@@ -363,6 +355,7 @@ Return strict JSON only:
       "query": "2-5 word photo query or null",
       "data": {
         "title": "chart or table title",
+        "chart_type": "bar|line",
         "labels": ["label"],
         "values": [1],
         "unit": "%",
@@ -377,7 +370,9 @@ Return strict JSON only:
 
 Rules:
 - Return exactly {visual_count} content visuals plus the cover.
-- Prefer a chart or table when the research contains useful numbers.
+- Use a chart only when the research has a clear numeric comparison or trend; otherwise use a table or photo.
+- Use line charts for trends over time and bar charts for direct comparisons.
+- Use at most one chart per article. Fill remaining slots with a table or photo.
 - Headings must exist exactly and be unique.
 - after_paragraph must fit inside that heading's section.
 - Never place a visual before the first H2, in FAQ, or in Sources.

@@ -388,18 +388,25 @@ class BlogRepository:
             result = (
                 _get_client()
                 .table("blog_topics")
-                .select("topic, primary_keyword, category, used_at")
-                .eq("status", "used")
-                .order("used_at", desc=True)
+                .select(
+                    "topic, primary_keyword, category, status, used_at, created_at"
+                )
+                .in_("status", ["used", "rejected", "selected"])
+                .order("created_at", desc=True)
                 .limit(max(1, min(200, limit)))
                 .execute()
             )
             history: list[TopicHistoryEntry] = []
             for row in _rows(result):
-                if not row.get("used_at"):
+                attempt_at = row.get("used_at") or row.get("created_at")
+                if not attempt_at:
                     continue
                 try:
-                    history.append(TopicHistoryEntry.model_validate(row))
+                    history.append(
+                        TopicHistoryEntry.model_validate(
+                            {**row, "used_at": attempt_at}
+                        )
+                    )
                 except Exception:
                     continue
             return history
@@ -422,7 +429,6 @@ class BlogRepository:
             "diversity_score": getattr(topic, "diversity_score", None),
             "total_score": getattr(topic, "total_score", None),
             "score_breakdown": getattr(topic, "score_breakdown", {}),
-            "status": "selected",
         }
 
         def run() -> str:
@@ -456,6 +462,18 @@ class BlogRepository:
                 {
                     "status": "used",
                     "used_post_id": post_id,
+                    "used_at": _iso(),
+                }
+            ).eq("id", topic_id).execute()
+
+        await asyncio.to_thread(run)
+
+    async def mark_topic_failed(self, topic_id: str) -> None:
+        def run() -> None:
+            _get_client().table("blog_topics").update(
+                {
+                    "status": "rejected",
+                    "used_post_id": None,
                     "used_at": _iso(),
                 }
             ).eq("id", topic_id).execute()

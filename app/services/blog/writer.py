@@ -246,6 +246,10 @@ def plain_text(content: str) -> str:
     return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
 
 
+def normalize_dashes(content: str) -> str:
+    return re.sub(r"[ \t]*\u2014[ \t]*", " - ", content or "")
+
+
 def word_count(content: str) -> int:
     return len(_WORD_RE.findall(plain_text(content)))
 

@@ -36,7 +36,7 @@ from .types import (
 )
 from .vercel import DeployError, trigger_deploy
 from .visuals import PixabayClient, VisualService, plan_visuals
-from .writer import repair_article, word_count, write_article
+from .writer import normalize_dashes, repair_article, word_count, write_article
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,7 @@ class PipelineRunner:
         self.report: GateReport | None = None
         self.meta: MetaResult | None = None
         self.faqs: FAQBundle | None = None
+        self.published = False
         self.current_stage = "preflight"
 
     async def run(self) -> PipelineOutcome:
@@ -149,6 +150,9 @@ class PipelineRunner:
             research = await self._research_stage(topic)
             keywords = await self._keyword_stage(topic, research)
             output = await self._writer_stage(topic, keywords, research)
+            output = output.model_copy(
+                update={"content": normalize_dashes(output.content)}
+            )
             plan, production = await self._visual_stage(
                 topic, output, research
             )
@@ -195,6 +199,13 @@ class PipelineRunner:
             words = (
                 self.report.metrics.word_count if self.report else None
             )
+            if self.topic_id and not self.published:
+                try:
+                    await self.repo.mark_topic_failed(self.topic_id)
+                except Exception:  # noqa: BLE001 - preserve the original failure
+                    logger.exception(
+                        "Could not mark topic failed for run %s", self.run_id
+                    )
             try:
                 await self.repo.update_run(
                     self.run_id,
@@ -575,6 +586,13 @@ class PipelineRunner:
                             repaired.output,
                             exclude_post_id=self.post_id,
                         )
+                        repaired_output = repaired_output.model_copy(
+                            update={
+                                "content": normalize_dashes(
+                                    repaired_output.content
+                                )
+                            }
+                        )
                         plan, production = await self._produce_visuals(
                             topic, repaired_output, research
                         )
@@ -765,6 +783,7 @@ class PipelineRunner:
                 raise PipelineStageError(
                     "Publish RPC rejected the draft; requirements not met."
                 )
+            self.published = True
             if self.topic_id:
                 try:
                     await self.repo.mark_topic_used(

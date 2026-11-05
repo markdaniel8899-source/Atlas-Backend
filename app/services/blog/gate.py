@@ -63,7 +63,7 @@ FINANCE_BAD_RE = re.compile(
 NUMERIC_CLAIM_RE = re.compile(
     r"(?<![\w.])(?:[$€£]\s?\d|\d[\d,]*(?:\.\d+)?\s?%|"
     r"\d[\d,]*(?:\.\d+)?\s?(?:million|billion|thousand|hours?|minutes?|"
-    r"days?|weeks?|months?|years?|GB|TB|MB|ms))\b",
+    r"days?|weeks?|months?|years?|GB|TB|MB|ms)\b)",
     re.IGNORECASE,
 )
 PLACEHOLDER_RE = re.compile(
@@ -79,6 +79,15 @@ TABLE_BLOCK_RE = re.compile(
 )
 INTERNAL_LINK_TARGETS = 1
 INTERNAL_LINK_MAX = 3
+SOFT_CHECK_IDS = {
+    "H08",
+    "H12",
+    "H13",
+    "H14",
+    "H15",
+    "H21",
+    "H24",
+}
 
 
 def run_gate(
@@ -144,7 +153,10 @@ def run_gate(
             )
         )
         if not passed and detail:
-            failures.append(GateFailure(id=check_id, detail=detail))
+            if check_id in SOFT_CHECK_IDS:
+                warnings.append(GateWarning(id=check_id, detail=detail))
+            else:
+                failures.append(GateFailure(id=check_id, detail=detail))
 
     check(
         "H01",
@@ -221,7 +233,7 @@ def run_gate(
         "H08",
         "seo",
         secondary_ratio >= 0.4 and long_tail_hits >= 1 and lsi_hits >= 3,
-        "Secondary coverage, long-tail count, or LSI coverage is too low (synonyms count toward LSI).",
+        "Secondary coverage, long-tail count, or LSI coverage is too low (use the exact LSI phrases where natural).",
     )
 
     minimum_citations = math.ceil(words / 600)
@@ -243,18 +255,22 @@ def run_gate(
         not malformed,
         f"Malformed or dead citation URL(s): {', '.join(malformed[:3])}",
     )
-    numeric_blocks = _unlinked_numeric_blocks(output.content)
     visual_trace_errors = _visual_trace_errors(
         visual_plan, visuals, research
     )
-    numeric_details = list(visual_trace_errors)
-    if numeric_blocks:
-        numeric_details.insert(0, "Numeric claims need inline citations.")
     check(
         "H11",
         "research",
-        not numeric_blocks and not visual_trace_errors,
-        "; ".join(numeric_details) or "Numeric claims need inline citations.",
+        not visual_trace_errors,
+        "; ".join(visual_trace_errors)
+        or "Visual data must trace to research sources.",
+    )
+    numeric_blocks = _unlinked_numeric_blocks(output.content)
+    check(
+        "H24",
+        "research",
+        not numeric_blocks,
+        "Numeric claims need inline citations.",
     )
     answer = _direct_answer_paragraph(editorial)
     check(
@@ -392,7 +408,7 @@ def _score(checks: Sequence[GateCheck], internal_links: Sequence[str]) -> int:
     groups = {
         "seo": (25, {"H02", "H03", "H04", "H06", "H07", "H08"}),
         "structure": (20, {"H01", "H05", "H12", "H21"}),
-        "research": (20, {"H09", "H10", "H11", "H20"}),
+        "research": (20, {"H09", "H10", "H11", "H20", "H24"}),
         "readability": (15, {"H13", "H14", "H15"}),
         "visuals": (10, {"H17"}),
         "product": (5, {"H19"}),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -50,11 +51,13 @@ def history_entry(
     category: Category = Category.AI,
     keyword: str | None = None,
     days_ago: int = 10,
+    status: str = "used",
 ) -> TopicHistoryEntry:
     return TopicHistoryEntry(
         topic=topic,
         category=category,
         primary_keyword=keyword,
+        status=status,
         used_at=NOW - timedelta(days=days_ago),
     )
 
@@ -128,6 +131,99 @@ class TopicScoringTests(unittest.TestCase):
     def test_empty_candidates(self) -> None:
         self.assertIsNone(select_topic([], now=NOW))
 
+    def test_empty_history_prefers_high_target_category(self) -> None:
+        candidates = [
+            candidate(
+                "Automation study reminders",
+                category=Category.AUTOMATION,
+                keyword="automation study reminders",
+            ),
+            candidate(
+                "AI study workflow",
+                category=Category.AI,
+                keyword="AI study workflow",
+            ),
+            candidate(
+                "Student loan planning",
+                category=Category.FINANCE,
+                keyword="student loan planning",
+            ),
+        ]
+        selected = select_topic(
+            candidates, now=NOW, rng=random.Random(0)
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.category, Category.AI)
+
+    def test_selects_least_recently_used_category(self) -> None:
+        history = [
+            history_entry("Recent AI topic", days_ago=1),
+            history_entry(
+                "Older software topic",
+                category=Category.SOFTWARE,
+                days_ago=30,
+            ),
+        ]
+        ai = candidate(
+            "AI study workflow",
+            category=Category.AI,
+            keyword="AI study workflow",
+            trend=100,
+            seo=100,
+            product=100,
+        )
+        software = candidate(
+            "Student dashboard software",
+            category=Category.SOFTWARE,
+            keyword="student dashboard software",
+            trend=20,
+            seo=20,
+            product=20,
+        )
+        selected = select_topic(
+            [ai, software], history, now=NOW, rng=random.Random(0)
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.category, Category.SOFTWARE)
+
+    def test_failed_attempt_rotates_to_another_category(self) -> None:
+        history = [
+            history_entry("Recent AI topic", days_ago=3),
+            history_entry(
+                "Failed automation topic",
+                category=Category.AUTOMATION,
+                days_ago=0,
+                status="rejected",
+            ),
+        ]
+        ai = candidate(
+            "AI study workflow",
+            category=Category.AI,
+            keyword="AI study workflow",
+        )
+        automation = candidate(
+            "Automated study reminders",
+            category=Category.AUTOMATION,
+            keyword="automated study reminders",
+        )
+        selected = select_topic(
+            [ai, automation], history, now=NOW, rng=random.Random(0)
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.category, Category.AI)
+
+    def test_selection_is_reproducible_with_seeded_rng(self) -> None:
+        candidates = [
+            candidate("AI topic one", keyword="AI topic one"),
+            candidate("AI topic two", keyword="AI topic two"),
+            candidate("AI topic three", keyword="AI topic three"),
+        ]
+        first = select_topic(candidates, now=NOW, rng=random.Random(7))
+        second = select_topic(candidates, now=NOW, rng=random.Random(7))
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.topic, second.topic)
+
 
 class TopicDeduplicationTests(unittest.TestCase):
     def test_exact_topic_within_90_days(self) -> None:
@@ -174,6 +270,55 @@ class TopicDeduplicationTests(unittest.TestCase):
             )
         ]
         self.assertIsNone(find_duplicate(item, history, now=NOW))
+
+    def test_failed_attempt_is_deduped_for_14_days(self) -> None:
+        item = candidate("AI note-taking for students")
+        history = [
+            history_entry(
+                "AI note-taking for students",
+                days_ago=5,
+                status="rejected",
+            )
+        ]
+        self.assertIn(
+            "failed attempt", find_duplicate(item, history, now=NOW) or ""
+        )
+
+    def test_failed_attempt_is_allowed_after_14_days(self) -> None:
+        item = candidate("AI note-taking for students")
+        history = [
+            history_entry(
+                "AI note-taking for students",
+                days_ago=20,
+                status="rejected",
+            )
+        ]
+        self.assertIsNone(find_duplicate(item, history, now=NOW))
+
+    def test_orphaned_selected_topic_is_deduped(self) -> None:
+        item = candidate("AI note-taking for students")
+        history = [
+            history_entry(
+                "AI note-taking for students",
+                days_ago=5,
+                status="selected",
+            )
+        ]
+        self.assertIn(
+            "failed attempt", find_duplicate(item, history, now=NOW) or ""
+        )
+
+    def test_failed_attempts_do_not_count_toward_category_mix(self) -> None:
+        history = [
+            history_entry("Used AI topic", days_ago=10),
+            history_entry(
+                "Failed AI topic",
+                days_ago=5,
+                status="rejected",
+            ),
+        ]
+        counts = category_counts(history)
+        self.assertEqual(counts[Category.AI], 1)
 
     def test_duplicate_candidates_are_collapsed(self) -> None:
         first = candidate("AI study planning")

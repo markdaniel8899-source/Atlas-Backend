@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import random
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,8 @@ CATEGORY_TARGETS: dict[Category, int] = {
 CATEGORY_WINDOW = 20
 TOPIC_DEDUPE_DAYS = 90
 KEYWORD_DEDUPE_DAYS = 60
+FAILED_TOPIC_DEDUPE_DAYS = 14
+TOPIC_SELECTION_POOL = 5
 JACCARD_THRESHOLD = 0.8
 WEIGHTS = {
     "trend": 0.30,
@@ -175,7 +178,9 @@ def category_counts(
 ) -> dict[Category, int]:
     counts: Counter[Category] = Counter()
     ordered = sorted(
-        history, key=lambda entry: _as_utc(entry.used_at), reverse=True
+        (entry for entry in history if entry.status == "used"),
+        key=lambda entry: _as_utc(entry.used_at),
+        reverse=True,
     )[:window]
     for entry in ordered:
         counts[entry.category] += 1
@@ -214,17 +219,36 @@ def find_duplicate(
     for entry in history:
         used = _as_utc(entry.used_at)
         age = current - used
-        if age <= timedelta(days=TOPIC_DEDUPE_DAYS):
+        failed = entry.status != "used"
+        topic_window = (
+            FAILED_TOPIC_DEDUPE_DAYS if failed else TOPIC_DEDUPE_DAYS
+        )
+        keyword_window = (
+            FAILED_TOPIC_DEDUPE_DAYS if failed else KEYWORD_DEDUPE_DAYS
+        )
+        if age <= timedelta(days=topic_window):
             if topic_slug(entry.topic) == candidate_slug:
-                return "exact topic used within 90 days"
+                return (
+                    f"failed attempt within {topic_window} days"
+                    if failed
+                    else "exact topic used within 90 days"
+                )
             if jaccard(candidate.topic, entry.topic) >= JACCARD_THRESHOLD:
-                return "near-duplicate topic used within 90 days"
+                return (
+                    f"near-duplicate failed attempt within {topic_window} days"
+                    if failed
+                    else "near-duplicate topic used within 90 days"
+                )
         if (
-            age <= timedelta(days=KEYWORD_DEDUPE_DAYS)
+            age <= timedelta(days=keyword_window)
             and entry.primary_keyword
             and normalize_text(entry.primary_keyword) == candidate_keyword
         ):
-            return "primary keyword used within 60 days"
+            return (
+                f"failed keyword attempt within {keyword_window} days"
+                if failed
+                else "primary keyword used within 60 days"
+            )
     return None
 
 
@@ -298,9 +322,51 @@ def select_topic(
     history: Sequence[TopicHistoryEntry] = (),
     *,
     now: datetime | None = None,
+    rng: random.Random | None = None,
 ) -> ScoredTopic | None:
     ranked = rank_topics(candidates, history, now=now)
-    return ranked[0] if ranked else None
+    if not ranked:
+        return None
+
+    pool = ranked[:TOPIC_SELECTION_POOL]
+    seen_categories = {item.category for item in pool}
+    for item in ranked[TOPIC_SELECTION_POOL:]:
+        if item.category not in seen_categories:
+            pool.append(item)
+            seen_categories.add(item.category)
+
+    categories = {item.category for item in pool}
+    if len(categories) > 1:
+        counts = category_counts(history)
+        last_attempt = _last_attempt_by_category(history)
+        chosen = min(
+            categories,
+            key=lambda category: (
+                last_attempt.get(category) is not None,
+                last_attempt.get(category)
+                or datetime.min.replace(tzinfo=timezone.utc),
+                -diversity_score(category, counts),
+                -CATEGORY_TARGETS.get(category, 0),
+                category.value,
+            ),
+        )
+        pool = [item for item in pool if item.category is chosen]
+
+    generator = rng or random
+    weights = [max(1.0, item.total_score) for item in pool]
+    return generator.choices(pool, weights=weights, k=1)[0]
+
+
+def _last_attempt_by_category(
+    history: Sequence[TopicHistoryEntry],
+) -> dict[Category, datetime]:
+    latest: dict[Category, datetime] = {}
+    for entry in history:
+        used = _as_utc(entry.used_at)
+        current = latest.get(entry.category)
+        if current is None or used > current:
+            latest[entry.category] = used
+    return latest
 
 
 def validate_topic_candidates(data: Any) -> list[TopicCandidate]:

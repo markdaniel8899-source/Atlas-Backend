@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.blog.writer import WriterParseError, parse_writer_output
+from app.services.blog.writer import (
+    WriterParseError,
+    normalize_dashes,
+    parse_writer_output,
+)
 
 
 def article(content: str) -> str:
@@ -18,6 +22,12 @@ def article(content: str) -> str:
 
 
 class WriterParseTests(unittest.TestCase):
+    def test_normalize_dashes_replaces_em_dash(self) -> None:
+        self.assertEqual(
+            normalize_dashes("<p>Fast \u2014 reliable.</p>"),
+            "<p>Fast - reliable.</p>",
+        )
+
     def test_repairs_bare_table_headers_and_rows(self) -> None:
         output = parse_writer_output(
             article(

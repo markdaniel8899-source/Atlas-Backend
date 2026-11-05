@@ -58,6 +58,7 @@ class TopicHistoryEntry(BaseModel):
     topic: str = Field(min_length=1)
     primary_keyword: str | None = None
     category: Category = Category.OTHER
+    status: str = "used"
     used_at: datetime
 
     @field_validator("category", mode="before")

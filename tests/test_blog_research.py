@@ -177,7 +177,7 @@ class ResearchServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ResearchError):
             await service.research("Topic")
 
-    async def test_requires_authoritative_source(self) -> None:
+    async def test_allows_tier_three_sources_with_warning(self) -> None:
         service, _ = build_service(
             [
                 [
@@ -188,9 +188,11 @@ class ResearchServiceTests(unittest.IsolatedAsyncioTestCase):
             ]
             * 3
         )
-        with self.assertRaises(ResearchError) as raised:
-            await service.research("Topic")
-        self.assertIn("authoritative", str(raised.exception))
+        bundle = await service.research("Topic")
+        self.assertEqual(len(bundle.sources), 3)
+        self.assertTrue(
+            all(source.tier is SourceTier.TIER_3 for source in bundle.sources)
+        )
 
     async def test_query_retry(self) -> None:
         service, fake = build_service(

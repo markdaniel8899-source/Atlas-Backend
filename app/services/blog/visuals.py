@@ -500,6 +500,11 @@ def validate_visual_plan(
     research_urls = {
         canonicalize_url(source.url) for source in research.sources
     }
+    charts = [
+        item for item in plan.visuals if item.type is VisualType.CHART
+    ]
+    for extra in charts[1:]:
+        extra.type = VisualType.TABLE
     photo_counts: dict[str, int] = {}
     locations: list[tuple[int, VisualType]] = []
 
@@ -571,7 +576,6 @@ def qa_visuals(
         errors.append("Duplicate media URLs detected.")
     if production.visuals:
         types = {visual.type for visual in production.visuals}
-        types.add(VisualType.PHOTO)
         if len(production.visuals) >= 2 and len(types) < 2:
             errors.append("Content visual types should vary.")
     for image in IMAGE_RE.findall(production.content):
@@ -670,6 +674,8 @@ def _validate_chart_data(
         raise VisualPlanError("Chart needs a title and source URL.")
     if not 2 <= len(data.labels) <= 8 or len(data.labels) != len(data.values):
         raise VisualPlanError("Chart needs 2-8 matching labels and values.")
+    chart_type = (data.chart_type or "bar").strip().lower()
+    data.chart_type = chart_type if chart_type in ("bar", "line") else "bar"
     _validate_source(data.source_url, research_urls)
 
 
