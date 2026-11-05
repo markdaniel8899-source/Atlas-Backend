@@ -114,9 +114,12 @@ def _clean_text(value: str) -> str:
 
 def parse_writer_output(raw: str) -> WriterOutput:
     text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:html|text)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text)
+    # Strip markdown code fences (any language hint) aggressively.
+    text = re.sub(r"^```(?:html|text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE)
+    # Remove any leftover leading/trailing backticks.
+    text = text.strip("`").strip()
+
     # Auto-fix missing scope attribute on <th> tags
     text = re.sub(
         r"<th\b(?![^>]*\bscope\s*=)([^>]*)>",
@@ -166,14 +169,31 @@ def parse_writer_output(raw: str) -> WriterOutput:
                     + table_content[end:]
                 )
         return f"<table>{table_content}</table>"
-    
+
     text = re.sub(r"<table>(.*?)</table>", _ensure_thead, text, flags=re.IGNORECASE | re.DOTALL)
     title = _extract_tag(text, "TITLE")
     slug = _extract_tag(text, "SLUG")
     excerpt = _extract_tag(text, "EXCERPT")
     direct_answer = _extract_tag(text, "direct_answer")
     content = _extract_content(text)
-    if not title or not content:
+
+    # Fallback: if strict CONTENT tag missing, try to treat whole cleaned text as content
+    if not content and text:
+        # Strip known wrapper tags if they leaked
+        candidate = re.sub(r"</?(TITLE|SLUG|EXCERPT|direct_answer|CONTENT)[^>]*>", "", text, flags=re.IGNORECASE).strip()
+        # Only accept fallback if it contains actual article structure, not just wrapper tag inner text.
+        if candidate and re.search(r"<p\b|<h[23]\b|<table\b|<ul\b|<ol\b", candidate, flags=re.IGNORECASE):
+            content = candidate
+
+    if not title:
+        # Fallback: use first H2/H1 as title, else first short line
+        h_match = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", content or text, flags=re.IGNORECASE | re.DOTALL)
+        title = _clean_text(h_match.group(1)) if h_match else ""
+        if not title:
+            first_line = (content or text).split("\n", 1)[0].strip()
+            title = _clean_text(re.sub(r"<[^>]+>", "", first_line))
+
+    if not title:
         raise WriterParseError("Writer output is missing TITLE or CONTENT.")
 
     title = _clean_text(title)
@@ -204,7 +224,7 @@ def parse_writer_output(raw: str) -> WriterOutput:
 
 def _extract_tag(text: str, name: str) -> str:
     match = re.search(
-        rf"<{name}>(.*?)</{name}>", text, flags=re.IGNORECASE | re.DOTALL
+        rf"<{name}\b[^>]*>(.*?)</{name}>", text, flags=re.IGNORECASE | re.DOTALL
     )
     return match.group(1).strip() if match else ""
 
