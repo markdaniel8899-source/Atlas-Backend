@@ -171,6 +171,7 @@ def parse_writer_output(raw: str) -> WriterOutput:
     title = _extract_tag(text, "TITLE")
     slug = _extract_tag(text, "SLUG")
     excerpt = _extract_tag(text, "EXCERPT")
+    direct_answer = _extract_tag(text, "direct_answer")
     content = _extract_content(text)
     if not title or not content:
         raise WriterParseError("Writer output is missing TITLE or CONTENT.")
@@ -197,6 +198,7 @@ def parse_writer_output(raw: str) -> WriterOutput:
         slug=slugify(slug or title),
         excerpt=clean_excerpt,
         content=content,
+        direct_answer=_clean_text(direct_answer),
     )
 
 

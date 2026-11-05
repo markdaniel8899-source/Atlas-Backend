@@ -146,6 +146,7 @@ class WriterOutput(BaseModel):
     slug: str
     excerpt: str
     content: str
+    direct_answer: str = ""
 
 
 class MetaPayload(BaseModel):

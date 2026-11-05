@@ -91,6 +91,16 @@ SOFT_CHECK_IDS = {
 }
 
 
+def _extract_tag_content(text: str, name: str) -> str:
+    """Safely extract plain-text content from a named HTML-style tag."""
+    match = re.search(
+        rf"<{name}>(.*?)</{name}>", text or "", flags=re.IGNORECASE | re.DOTALL
+    )
+    if not match:
+        return ""
+    return plain_text(match.group(1).strip())
+
+
 def run_gate(
     output: WriterOutput,
     keywords: KeywordPlan,
@@ -182,11 +192,12 @@ def run_gate(
         slug_valid and not collision,
         "Slug is invalid or already used.",
     )
+    excerpt_text = _extract_tag_content(output.content, "excerpt") or output.excerpt
     check(
         "H04",
         "seo",
-        100 <= len(output.excerpt) <= 200,
-        f"Excerpt is {len(output.excerpt)} chars; required 100-200.",
+        100 <= len(excerpt_text) <= 200,
+        f"Excerpt is {len(excerpt_text)} chars; required 100-200.",
     )
 
     skipped_h3 = _has_skipped_h3(output.content)
@@ -217,8 +228,8 @@ def run_gate(
     check(
         "H07",
         "seo",
-        density <= 3.0,
-        f"Keyword density is {density:.2f}%; maximum 3.0% to avoid stuffing.",
+        density <= 2.5,
+        f"Keyword density is {density:.2f}%; maximum 2.5% to avoid stuffing.",
     )
     check(
         "H25",
@@ -279,12 +290,12 @@ def run_gate(
         not numeric_blocks,
         "Numeric claims need inline citations.",
     )
-    answer = _direct_answer_paragraph(editorial)
+    direct_answer = _extract_tag_content(output.content, "direct_answer")
     check(
         "H12",
         "structure",
-        answer is not None,
-        "Need a 40-70 word direct answer in the first 150 words.",
+        40 <= word_count(direct_answer) <= 70,
+        "Need a 40-70 word direct answer in the first 150 words (wrap it in <direct_answer>).",
     )
     check(
         "H13",
@@ -522,22 +533,6 @@ def _has_skipped_h3(content: str) -> bool:
         elif not seen_h2:
             return True
     return False
-
-
-def _direct_answer_paragraph(content: str) -> str | None:
-    paragraphs = re.findall(
-        r"<p\b[^>]*>(.*?)</p>", content or "", flags=re.IGNORECASE | re.DOTALL
-    )
-    consumed = 0
-    for paragraph in paragraphs:
-        text = plain_text(paragraph)
-        count = len(text.split())
-        if consumed <= 150 and 40 <= count <= 70 and text:
-            return text
-        consumed += count
-        if consumed > 150:
-            break
-    return None
 
 
 def _editorial_content(content: str) -> str:

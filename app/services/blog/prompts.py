@@ -159,7 +159,7 @@ MANDATORY SEO AND CITATION RULES (NON-NEGOTIABLE, CHECKED BY AN AUTOMATED GATE):
   - The very first paragraph, within the first 100 words of the article body.
   - At least ONE (1) <h2> subheading.
   Use the exact phrase character for character in these three places. In all other H2s and body text, prefer synonyms and related LSI terms to avoid keyword stuffing.
-- H07 KEYWORD DENSITY: For an article of ~1200 words, use the exact phrase "{primary_keyword}" naturally 5 to 7 times throughout the body text (minimum 4 exact uses; 0.3% is the floor, 0.4%-0.8% is ideal). Never exceed 3.0% density. Do not rely only on synonyms. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
+- H07 KEYWORD DENSITY: For an article of ~1200 words, use the exact phrase "{primary_keyword}" naturally 5 to 7 times throughout the body text (minimum 4 exact uses; 0.4%-0.8% is ideal). Never exceed 2.5% density. Do not rely only on synonyms. The checker ignores HTML tables, so every counted use must appear in paragraphs, lists, headings, or FAQ text.
 - H11 MANDATORY INLINE CITATIONS: Whenever you state a statistic, percentage, year, or numeric claim (e.g., "80 percent", "2026", "40 to 60 percent"), you MUST append an inline citation immediately after it, inside the SAME <p>, <li>, or <blockquote> element.
   - Format: a real HTML hyperlink with a bracket label, like <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> or <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[Source 1]</a>.
   - Example: <p>Studies show a 60% improvement <a href="EXACT_RESEARCH_URL" rel="noopener noreferrer" target="_blank">[1]</a> in productivity.</p>
@@ -175,8 +175,9 @@ Research rules:
 
 SEO and answer-engine rules:
 - Put the primary keyword in the title, first 100 words, and at least one H2 heading.
-- Open with a direct, useful answer of 40-70 words inside the first 150 words.
-- Use multiple H2 sections with scannable paragraphs, lists, or a table (no strict minimum or maximum; one H2 minimum).
+- Open with a direct, useful answer of 40-70 words inside the first 150 words. Wrap that answer in a <direct_answer>...</direct_answer> tag so the gate can verify it.
+- End with an <excerpt>...</excerpt> tag containing a 100-200 word plain-text summary of the article.
+- Return clean HTML only. Do not wrap output in markdown code fences (```html or ```). Strip all markdown wrappers; the configuration parser accepts clean HTML directly.
 - Use question-style H2s where they read naturally.
 - Add up to 3 contextual internal links from the supplied ATLAS links (max 3; do not exceed).
 - End with a practical takeaway and a short ATLAS CTA.
