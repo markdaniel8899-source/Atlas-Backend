@@ -61,6 +61,7 @@ WRITER_TAGS = {
     "pre",
     "code",
     "direct_answer",
+    "excerpt",
     "br",
 }
 
