@@ -506,10 +506,10 @@ async def plan_visuals(
     validate_visual_plan(
         result.data, content, research, required_count=required_count
     )
-    plan = _expand_visual_coverage(result.data, content, research)
+    plan = result.data
     if len(plan.visuals) != required_count:
-        validate_visual_plan(
-            plan, content, research, required_count=len(plan.visuals)
+        raise VisualPlanError(
+            f"Expected {required_count} content visuals, got {len(plan.visuals)}."
         )
     return plan
 
